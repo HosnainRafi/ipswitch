@@ -41,35 +41,35 @@ if "%choice%"=="7" exit
 goto menu
 
 :check
-powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\ipswitch.ps1" -Mode check
+powershell -ExecutionPolicy Bypass -File "%~dp0IPSwitch.ps1" -Mode check
 echo.
 pause
 goto menu
 
 :change
-powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\ipswitch.ps1" -Mode change
+powershell -ExecutionPolicy Bypass -File "%~dp0IPSwitch.ps1" -Mode change
 echo.
 pause
 goto menu
 
 :status
-powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\ipswitch.ps1" -Mode status
+powershell -ExecutionPolicy Bypass -File "%~dp0IPSwitch.ps1" -Mode status
 echo.
 pause
 goto menu
 
 :monitor
-powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\ipswitch.ps1" -Mode monitor
+powershell -ExecutionPolicy Bypass -File "%~dp0IPSwitch.ps1" -Mode monitor
 goto menu
 
 :revert
-powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\ipswitch.ps1" -Revert
+powershell -ExecutionPolicy Bypass -File "%~dp0IPSwitch.ps1" -Revert
 echo.
 pause
 goto menu
 
 :autoclaw
-powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\ipswitch.ps1" -Mode autoclaw
+powershell -ExecutionPolicy Bypass -File "%~dp0IPSwitch.ps1" -Mode autoclaw
 echo.
 pause
 goto menu

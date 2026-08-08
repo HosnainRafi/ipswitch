@@ -40,8 +40,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Split-Path -Parent $ScriptDir
-Set-Location $ProjectRoot
+Set-Location $ScriptDir
+
 # === Constants ===
 $WARP_CLI = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
 $PROTON_CLI = "protonvpn-cli"
@@ -51,10 +51,10 @@ $PRIVADO_CLI = "privadovpn"
 $AUTOCLOW_EXE = "C:\Program Files\AutoClaw\AutoClaw.exe"
 $AUTOCLOW_API = "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions"
 $AUTOCLOW_DATA_DIR = "$env:APPDATA\AutoClaw"
-$AutoClawLog = Join-Path $ProjectRoot "logs\autoclaw-fix-log.csv"
-$StateFile = Join-Path $ProjectRoot "logs\device-ip-state.json"
-$LogFile = Join-Path $ProjectRoot "logs\device-ip-manager.log"
-$CredFile = Join-Path $ProjectRoot "logs\vpn-credentials.json"
+$AutoClawLog = Join-Path $ScriptDir "logs\autoclaw-fix-log.csv"
+$StateFile = Join-Path $ScriptDir "logs\device-ip-state.json"
+$LogFile = Join-Path $ScriptDir "logs\device-ip-manager.log"
+$CredFile = Join-Path $ScriptDir "logs\vpn-credentials.json"
 $MaxVPNRetries = 5
 
 # winget package IDs

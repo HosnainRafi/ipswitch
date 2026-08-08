@@ -31,10 +31,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Split-Path -Parent $ScriptDir
-Set-Location $ProjectRoot
-$ConfigPath = Join-Path $ProjectRoot "config\config.json"
-if (-not (Test-Path $ConfigPath)) { $ConfigPath = Join-Path $ScriptDir "config.json" }
+Set-Location $ScriptDir
+
+# ─── Load Config ───
+$ConfigPath = Join-Path $ScriptDir "config.json"
 if (-not (Test-Path $ConfigPath)) {
     Write-Host "[FATAL] config.json not found at $ConfigPath" -ForegroundColor Red
     Write-Host "        Copy config.example.json to config.json and edit it." -ForegroundColor Yellow
@@ -42,17 +42,17 @@ if (-not (Test-Path $ConfigPath)) {
 }
 $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
-# --- Paths ---
-$LogFile = Join-Path $ProjectRoot $Config.logging.log_file
+# ─── Paths ───
+$LogFile = Join-Path $ScriptDir $Config.logging.log_file
 $LogDir = Split-Path -Parent $LogFile
-$StateFile = Join-Path $ProjectRoot "logs\state.json"
-$DashboardLog = Join-Path $ProjectRoot "logs\dashboard.json"
+$StateFile = Join-Path $ScriptDir "logs\state.json"
+$DashboardLog = Join-Path $ScriptDir "logs\dashboard.json"
 
 if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 }
 
-# --- Logging ---
+# ─── Logging ───
 function Write-Log {
     param(
         [string]$Message,
@@ -90,7 +90,7 @@ function Write-ActivityLog {
     $fields = @($timestamp,$OldIP,$NewIP,$Method,$TargetURL,$Outcome,$Details) | ForEach-Object { $_ -replace '"', '""' }
     $csvLine = '"' + ($fields -join '","') + '"'
 
-    $activityCsv = Join-Path $ProjectRoot "logs\activity_log.csv"
+    $activityCsv = Join-Path $ScriptDir "logs\activity_log.csv"
     if (-not (Test-Path $activityCsv)) {
         $header = '"Timestamp","OldIP","NewIP","Method","TargetURL","Outcome","Details"'
         Add-Content -Path $activityCsv -Value $header
@@ -110,7 +110,7 @@ function Write-ActivityLog {
     Add-Content -Path $DashboardLog -Value $entry -ErrorAction SilentlyContinue
 }
 
-# --- Save/Load State (for revert) ---
+# ─── Save/Load State (for revert) ───
 function Save-State {
     param(
         [string]$PreviousIP,
@@ -134,7 +134,7 @@ function Load-State {
     return $null
 }
 
-# --- Get Public IP ---
+# ─── Get Public IP ───
 function Get-PublicIP {
     param([int]$Timeout = 10)
     try {
@@ -149,7 +149,7 @@ function Get-PublicIP {
     }
 }
 
-# --- Get Local IP Info ---
+# ─── Get Local IP Info ───
 function Get-LocalIPInfo {
     try {
         $adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
@@ -171,7 +171,7 @@ function Get-LocalIPInfo {
     }
 }
 
-# --- Check Target URL for Rate Limiting ---
+# ─── Check Target URL for Rate Limiting ───
 function Test-TargetURL {
     param([string]$URL)
 
@@ -224,7 +224,7 @@ function Test-TargetURL {
     }
 }
 
-# --- AutoClaw API Health Check ---
+# ─── AutoClaw API Health Check ───
 function Test-AutoClawAPI {
     if (-not $Config.autoclaw_monitoring.enabled) {
         return @{ Healthy = $true; Reason = "AutoClaw monitoring disabled" }
@@ -412,7 +412,7 @@ function Invoke-AutoClawRecovery {
     }
 }
 
-# --- DHCP IP Change ---
+# ─── DHCP IP Change ───
 function Invoke-DHCPChange {
     param([string]$PreviousIP)
 
@@ -470,7 +470,7 @@ function Invoke-DHCPChange {
         }
 
         if ($newIP -ne $PreviousIP) {
-            Write-Log "Public IP changed: $PreviousIP ? $newIP" "success"
+            Write-Log "Public IP changed: $PreviousIP → $newIP" "success"
             Save-State -PreviousIP $PreviousIP -Method "dhcp" -NetworkConfig $networkConfig
             return @{ Success = $true; NewIP = $newIP; Error = "" }
         } else {
@@ -484,7 +484,7 @@ function Invoke-DHCPChange {
     }
 }
 
-# --- VPN Fallback ---
+# ─── VPN Fallback ───
 function Invoke-VPNChange {
     param([string]$PreviousIP)
 
@@ -540,7 +540,7 @@ function Invoke-VPNChange {
                     $newIP = Get-PublicIP -Timeout $Config.ip_change.ip_check_timeout_seconds
 
                     if ($newIP -and $newIP -ne $PreviousIP) {
-                        Write-Log "VPN connected! IP changed: $PreviousIP ? $newIP" "success"
+                        Write-Log "VPN connected! IP changed: $PreviousIP → $newIP" "success"
                         $networkConfig.vpn_was_connected = $true
                         $networkConfig.vpn_profile = $profileName
                         Save-State -PreviousIP $PreviousIP -Method "vpn" -NetworkConfig $networkConfig
@@ -574,7 +574,7 @@ function Invoke-VPNChange {
 
                     $newIP = Get-PublicIP -Timeout $Config.ip_change.ip_check_timeout_seconds
                     if ($newIP -and $newIP -ne $PreviousIP) {
-                        Write-Log "WireGuard connected! IP changed: $PreviousIP ? $newIP" "success"
+                        Write-Log "WireGuard connected! IP changed: $PreviousIP → $newIP" "success"
                         $networkConfig.vpn_was_connected = $true
                         $networkConfig.vpn_profile = $tunnelName
                         Save-State -PreviousIP $PreviousIP -Method "vpn" -NetworkConfig $networkConfig
@@ -598,7 +598,7 @@ function Invoke-VPNChange {
 
                     $newIP = Get-PublicIP -Timeout $Config.ip_change.ip_check_timeout_seconds
                     if ($newIP -and $newIP -ne $PreviousIP) {
-                        Write-Log "VPN connected! IP changed: $PreviousIP ? $newIP" "success"
+                        Write-Log "VPN connected! IP changed: $PreviousIP → $newIP" "success"
                         $networkConfig.vpn_was_connected = $true
                         $networkConfig.vpn_profile = $profile
                         Save-State -PreviousIP $PreviousIP -Method "vpn" -NetworkConfig $networkConfig
@@ -623,7 +623,7 @@ function Invoke-VPNChange {
     }
 }
 
-# --- Revert Function ---
+# ─── Revert Function ───
 function Invoke-Revert {
     Write-Log "Reverting to previous IP configuration..." "info"
 
@@ -733,7 +733,7 @@ function Invoke-Revert {
     Write-Log "Revert complete. State cleared." "success"
 }
 
-# --- Check Internet Connectivity ---
+# ─── Check Internet Connectivity ───
 function Test-InternetConnectivity {
     $ip = Get-PublicIP -Timeout 10
     if ($ip) {
@@ -742,7 +742,7 @@ function Test-InternetConnectivity {
     return @{ Connected = $false; IP = $null }
 }
 
-# --- Main IP Change Workflow ---
+# ─── Main IP Change Workflow ───
 function Invoke-IPChange {
     param(
         [string]$TargetURL = "",
@@ -855,7 +855,7 @@ function Invoke-IPChange {
     return $false
 }
 
-# --- Main Logic ---
+# ─── Main Logic ───
 
 if ($Revert) {
     Invoke-Revert
@@ -889,7 +889,7 @@ switch ($Mode) {
             $result = Test-TargetURL -URL $url
             $status = if ($result.RateLimited) { "RATE LIMITED" } else { "OK" }
             $color = if ($result.RateLimited) { "Red" } else { "Green" }
-            Write-Host "    $url ? $status ($($result.Reason))" -ForegroundColor $color
+            Write-Host "    $url → $status ($($result.Reason))" -ForegroundColor $color
         }
         Write-Host ""
     }
@@ -917,10 +917,10 @@ switch ($Mode) {
             $success = Invoke-IPChange -TargetURL $rateLimitedURL -Reason "Rate limit detected"
             if ($success) {
                 Write-Host ""
-                Write-Host "  ? Issue resolved! IP changed and target accessible." -ForegroundColor Green
+                Write-Host "  ✓ Issue resolved! IP changed and target accessible." -ForegroundColor Green
             } else {
                 Write-Host ""
-                Write-Host "  ? Could not resolve rate limiting. Try manual VPN switch." -ForegroundColor Red
+                Write-Host "  ✗ Could not resolve rate limiting. Try manual VPN switch." -ForegroundColor Red
             }
         } else {
             Write-Host "  All targets accessible. No rate limiting detected." -ForegroundColor Green
@@ -935,9 +935,9 @@ switch ($Mode) {
         Write-Host ""
         $success = Invoke-IPChange -Reason "Manual trigger"
         if ($success) {
-            Write-Host "  ? IP changed successfully." -ForegroundColor Green
+            Write-Host "  ✓ IP changed successfully." -ForegroundColor Green
         } else {
-            Write-Host "  ? IP change failed." -ForegroundColor Red
+            Write-Host "  ✗ IP change failed." -ForegroundColor Red
         }
         Write-Host ""
     }

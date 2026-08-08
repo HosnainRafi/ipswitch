@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Fix-AutoClaw.ps1 - One-click AutoClaw IP fixer with IP rotation
 .DESCRIPTION
@@ -19,8 +19,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Split-Path -Parent $ScriptDir
-Set-Location $ProjectRoot
+
+$WARP_CLI = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
 $AUTOCLOW_EXE = "C:\Program Files\AutoClaw\AutoClaw.exe"
 $MAX_IP_ROTATIONS = 5  # Try up to 5 different IPs
 
@@ -138,7 +138,7 @@ function Flush-DNSCache {
 function Log-Result {
     param([string]$OldIP, [string]$NewIP, [string]$Method, [string]$Outcome, [string]$Details = "")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logFile = Join-Path $ProjectRoot "logs\fix_autoclaw_log.csv"
+    $logFile = Join-Path $ScriptDir "logs\fix_autoclaw_log.csv"
     $logDir = Split-Path -Parent $logFile
     if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
     if (-not (Test-Path $logFile)) {
@@ -149,9 +149,9 @@ function Log-Result {
     Add-Content -Path $logFile -Value $line -ErrorAction SilentlyContinue
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════════════
 #  DISCONNECT MODE
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════════════
 if ($Disconnect) {
     Write-Host ""
     Write-Host "  ==================================================" -ForegroundColor Cyan
@@ -169,9 +169,9 @@ if ($Disconnect) {
     exit 0
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════════════
 #  MAIN - Fix AutoClaw with IP Rotation
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════════════
 
 Write-Host ""
 Write-Host "  ==================================================" -ForegroundColor Cyan
