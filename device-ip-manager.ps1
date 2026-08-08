@@ -30,11 +30,12 @@
 #>
 
 param(
-    [ValidateSet("change","restore","status","test","setup")]
+    [ValidateSet("change","restore","status","test","setup","fix-autoclaw")]
     [string]$Action = "change",
     [string]$Url = "",
     [ValidateSet("warp","proton","windscribe","privado","dhcp","auto")]
-    [string]$Method = "warp"
+    [string]$Method = "warp",
+    [switch]$SkipAutoClawClear
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +48,10 @@ $PROTON_CLI = "protonvpn-cli"
 $WINDSCRIBE_CLI = "C:\Program Files\Windscribe\windscribe-cli.exe"
 $PRIVADO_CLI = "privadovpn"
 
+$AUTOCLOW_EXE = "C:\Program Files\AutoClaw\AutoClaw.exe"
+$AUTOCLOW_API = "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions"
+$AUTOCLOW_DATA_DIR = "$env:APPDATA\AutoClaw"
+$AutoClawLog = Join-Path $ScriptDir "logs\autoclaw-fix-log.csv"
 $StateFile = Join-Path $ScriptDir "logs\device-ip-state.json"
 $LogFile = Join-Path $ScriptDir "logs\device-ip-manager.log"
 $CredFile = Join-Path $ScriptDir "logs\vpn-credentials.json"
@@ -1187,13 +1192,337 @@ function Invoke-TestUrl {
 }
 
 # ==================================================================
+#  AUTOCLOW API TEST
+# ==================================================================
+
+function Test-AutoClawAPI {
+    param([int]$Timeout = 15)
+    try {
+        $response = Invoke-WebRequest -Uri $AUTOCLOW_API -Method Post -TimeoutSec $Timeout -UseBasicParsing -ContentType "application/json" -Body '{"model":"test"}' -ErrorAction Stop
+        return @{ Accessible = $true; Status = "OK"; Code = $response.StatusCode }
+    } catch {
+        $status = 0
+        if ($_.Exception.Response) {
+            $status = [int]$_.Exception.Response.StatusCode
+        }
+        if ($status -eq 401) { return @{ Accessible = $true; Status = "Reachable (401)"; Code = 401 } }
+        if ($status -eq 403) { return @{ Accessible = $false; Status = "Blocked (403)"; Code = 403 } }
+        if ($status -eq 429) { return @{ Accessible = $false; Status = "Rate-limited (429)"; Code = 429 } }
+        if ($status -eq 0) { return @{ Accessible = $false; Status = "Unreachable"; Code = 0 } }
+        return @{ Accessible = $false; Status = "HTTP $status"; Code = $status }
+    }
+}
+
+# ==================================================================
+#  AUTOCLOW SESSION CLEAR (clear cookies/cache for account-level blocks)
+# ==================================================================
+
+function Clear-AutoClawSession {
+    Write-Log "Clearing AutoClaw session data (cookies, cache, local storage)..." "info"
+
+    $cleared = $false
+
+    # Kill AutoClaw process first
+    $ac = Get-Process "AutoClaw" -ErrorAction SilentlyContinue
+    if ($ac) {
+        Write-Log "Closing AutoClaw..." "info"
+        Stop-Process -Name "AutoClaw" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+    }
+
+    # Clear Electron app data
+    $dataDirs = @($AUTOCLOW_DATA_DIR, "$env:LOCALAPPDATA\AutoClaw")
+    $sessionSubDirs = @("Cache", "Code Cache", "GPUCache", "Cookies", "Cookies-journal",
+                        "Local Storage", "Session Storage", "IndexedDB", "Service Worker", "Network")
+
+    foreach ($baseDir in $dataDirs) {
+        if (-not (Test-Path $baseDir)) { continue }
+        foreach ($sub in $sessionSubDirs) {
+            $target = Join-Path $baseDir $sub
+            if (Test-Path $target) {
+                try {
+                    Remove-Item -Path $target -Recurse -Force -ErrorAction Stop
+                    Write-Log "  Cleared: $sub" "success"
+                    $cleared = $true
+                } catch {}
+            }
+        }
+        # Also check User Data/Default profile
+        $userDefaultDir = Join-Path $baseDir "User Data\Default"
+        if (Test-Path $userDefaultDir) {
+            foreach ($sub in $sessionSubDirs) {
+                $target = Join-Path $userDefaultDir $sub
+                if (Test-Path $target) {
+                    try {
+                        Remove-Item -Path $target -Recurse -Force -ErrorAction Stop
+                        Write-Log "  Cleared (profile): $sub" "success"
+                        $cleared = $true
+                    } catch {}
+                }
+            }
+        }
+    }
+
+    Start-Process -FilePath "ipconfig" -ArgumentList "/flushdns" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\dim_out.txt" -RedirectStandardError "$env:TEMP\dim_err.txt"
+
+    if ($cleared) {
+        Write-Log "AutoClaw session data cleared." "success"
+    } else {
+        Write-Log "No AutoClaw session data found to clear." "info"
+    }
+    return $cleared
+}
+
+# ==================================================================
+#  AUTOCLOW RESTART
+# ==================================================================
+
+function Restart-AutoClaw {
+    Write-Log "Restarting AutoClaw..." "info"
+
+    $ac = Get-Process "AutoClaw" -ErrorAction SilentlyContinue
+    if ($ac) {
+        Stop-Process -Name "AutoClaw" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+    }
+
+    if (Test-Path $AUTOCLOW_EXE) {
+        Start-Process -FilePath $AUTOCLOW_EXE
+        Write-Log "AutoClaw started. Waiting 10s for initialization..." "info"
+        Start-Sleep -Seconds 10
+    } else {
+        Write-Log "AutoClaw.exe not found at $AUTOCLOW_EXE" "warn"
+    }
+}
+
+# ==================================================================
+#  AUTOCLOW FIX LOG
+# ==================================================================
+
+function Write-AutoClawLog {
+    param([string]$OldIP, [string]$NewIP, [string]$Method, [string]$Outcome, [string]$Details = "")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logDir = Split-Path -Parent $AutoClawLog
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    if (-not (Test-Path $AutoClawLog)) {
+        Add-Content -Path $AutoClawLog -Value '"Timestamp","OldIP","NewIP","Method","Outcome","Details"'
+    }
+    $fields = @($timestamp, $OldIP, $NewIP, $Method, $Outcome, $Details) | ForEach-Object { $_ -replace '"', '""' }
+    $line = '"' + ($fields -join '","') + '"'
+    Add-Content -Path $AutoClawLog -Value $line -ErrorAction SilentlyContinue
+}
+
+# ==================================================================
+#  FIX AUTOCLOW (fully automatic - works with all VPNs)
+# ==================================================================
+
+function Invoke-FixAutoClaw {
+    param([string]$PreferredMethod = "auto", [bool]$ClearSession = $true)
+
+    Write-Host ""
+    Write-Host "  ============================================" -ForegroundColor Cyan
+    Write-Host "    Fix AutoClaw - Fully Automatic" -ForegroundColor Cyan
+    Write-Host "  ============================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Step 1: Check current IP and AutoClaw API
+    Write-Log "Step 1: Checking current connection and AutoClaw API..." "info"
+    $oldIP = Get-PublicIP
+    if (-not $oldIP) {
+        Write-Log "No internet connection!" "error"
+        return $false
+    }
+    Write-Log "Current IP: $oldIP" "info"
+
+    $apiStatus = Test-AutoClawAPI
+    $apiColor = if ($apiStatus.Accessible) { "Green" } else { "Red" }
+    Write-Host "    AutoClaw API: $($apiStatus.Status)" -ForegroundColor $apiColor
+
+    if ($apiStatus.Accessible) {
+        Write-Log "AutoClaw API is already accessible. No fix needed." "success"
+        Write-Host ""
+        $choice = Read-Host "  Change IP anyway? (y/n)"
+        if ($choice -ne "y" -and $choice -ne "Y") {
+            Write-Host "  No changes made." -ForegroundColor Cyan
+            return $true
+        }
+    } else {
+        Write-Log "AutoClaw API is BLOCKED: $($apiStatus.Status)" "warn"
+        Write-Log "This is likely caused by shared IP rate limiting (CGNAT)." "info"
+    }
+
+    # Step 2: Clear AutoClaw session data (handles account-level blocks)
+    $sessionCleared = $false
+    if ($ClearSession -and -not $SkipAutoClawClear) {
+        Write-Host ""
+        Write-Log "Step 2: Clearing AutoClaw session data..." "info"
+        $sessionCleared = Clear-AutoClawSession
+    } else {
+        Write-Log "Step 2: Skipping AutoClaw session clear." "info"
+    }
+
+    # Step 3: Change IP using selected VPN method
+    Write-Host ""
+    Write-Log "Step 3: Changing IP to bypass AutoClaw IP block..." "info"
+
+    # Determine method order
+    if ($PreferredMethod -eq "auto") {
+        $methods = @("warp", "proton", "windscribe", "privado", "dhcp")
+    } else {
+        $methods = @($PreferredMethod)
+    }
+
+    $newIP = $null
+    $usedMethod = $null
+    $vpnActiveFlags = @{ warp = $false; proton = $false; windscribe = $false; privado = $false }
+    $triedIPs = @()
+
+    foreach ($m in $methods) {
+        Write-Host ""
+        Write-Log "Trying method: $m" "info"
+
+        if ($m -eq "dhcp") {
+            $dhcpIP = Invoke-DHCPChange
+            if ($dhcpIP -and $dhcpIP -ne $oldIP) {
+                # Test AutoClaw API
+                Start-Sleep -Seconds 2
+                $apiTest = Test-AutoClawAPI
+                if ($apiTest.Accessible) {
+                    Write-Log "AutoClaw API accessible via DHCP! $($apiTest.Status)" "success"
+                    $newIP = $dhcpIP
+                    $usedMethod = "dhcp"
+                    break
+                } else {
+                    Write-Log "AutoClaw API still blocked after DHCP: $($apiTest.Status)" "warn"
+                }
+            }
+            continue
+        }
+
+        # VPN methods - auto-install if needed
+        if (-not (Test-VPNInstalled -VPNMethod $m)) {
+            Write-Log "$($VPNNames[$m]) not installed. Auto-installing..." "warn"
+            $installed = Install-VPN -VPNMethod $m
+            if (-not $installed) { continue }
+            if ($m -ne "warp") {
+                $creds = Load-Credentials
+                $hasCred = Get-VPNCredential -VPNMethod $m -StoredCreds $creds
+                if (-not $hasCred) {
+                    Write-Log "$($VPNNames[$m]) needs credentials. Run setup first:" "warn"
+                    Write-Log "  .\device-ip-manager.ps1 -Action setup -Method $m" "info"
+                    $doSetup = Read-Host "  Set up now? (y/n)"
+                    if ($doSetup -eq "y" -or $doSetup -eq "Y") {
+                        Invoke-VPNCredentialSetup -VPNMethod $m
+                    } else { continue }
+                }
+            }
+        }
+
+        $maxRetries = if ($m -eq "warp") { $MaxVPNRetries } else { 3 }
+
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            Write-Log "$($VPNNames[$m]) attempt $attempt of $maxRetries..." "info"
+            $vpnResult = Invoke-VPNConnect -VPNMethod $m
+            $vpnIP = $vpnResult.IP
+
+            if (-not $vpnIP) {
+                Write-Log "$($VPNNames[$m]) failed to connect." "warn"
+                Start-Sleep -Seconds 3
+                continue
+            }
+
+            Write-Log "$($VPNNames[$m]) IP: $vpnIP" "info"
+
+            if ($vpnIP -eq $oldIP -or $triedIPs -contains $vpnIP) {
+                Write-Log "Same or duplicate IP. Trying again..." "warn"
+                continue
+            }
+
+            $triedIPs += $vpnIP
+
+            # Test AutoClaw API with this IP
+            Start-Sleep -Seconds 2
+            $apiTest = Test-AutoClawAPI
+            Write-Log "AutoClaw API test: $($apiTest.Status)" "info"
+
+            if ($apiTest.Accessible) {
+                Write-Log "AutoClaw API is accessible! IP: $vpnIP" "success"
+                $newIP = $vpnIP
+                $usedMethod = $m
+                $vpnActiveFlags[$m] = $true
+                break
+            } else {
+                Write-Log "AutoClaw API still blocked from this IP. Rotating..." "warn"
+            }
+        }
+
+        if ($newIP) { break }
+    }
+
+    # Step 4: Finalize
+    Write-Host ""
+    Write-Log "Step 4: Finalizing..." "info"
+
+    if ($newIP) {
+        Flush-DNS
+        Save-State -OriginalIP $oldIP -MethodUsed $usedMethod -Extra $vpnActiveFlags
+
+        # Restart AutoClaw (especially if session was cleared)
+        if ($sessionCleared) {
+            Restart-AutoClaw
+        }
+
+        # Final API check
+        Start-Sleep -Seconds 5
+        $finalCheck = Test-AutoClawAPI
+
+        Write-Host ""
+        Write-Host "  ============================================" -ForegroundColor Green
+        Write-Host "    AUTOCLOW FIXED SUCCESSFULLY" -ForegroundColor Green
+        Write-Host "  ============================================" -ForegroundColor Green
+        Write-Host "    Old IP:       $oldIP" -ForegroundColor White
+        Write-Host "    New IP:       $newIP" -ForegroundColor White
+        Write-Host "    Method:       $usedMethod" -ForegroundColor White
+        Write-Host "    API Status:   $($finalCheck.Status)" -ForegroundColor White
+        if ($sessionCleared) {
+            Write-Host "    Session:      Cleared + Restarted" -ForegroundColor Green
+        }
+        Write-Host "  ============================================" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  Try logging into AutoClaw now." -ForegroundColor Green
+        Write-Host ""
+
+        Write-AutoClawLog -OldIP $oldIP -NewIP $newIP -Method $usedMethod -Outcome "success" -Details "API: $($finalCheck.Status), IPs tried: $($triedIPs.Count), Session cleared: $sessionCleared"
+        return $true
+    } else {
+        Write-Host ""
+        Write-Host "  ============================================" -ForegroundColor Red
+        Write-Host "    AUTOCLOW FIX FAILED" -ForegroundColor Red
+        Write-Host "  ============================================" -ForegroundColor Red
+        Write-Host "    All VPN methods exhausted." -ForegroundColor White
+        Write-Host "    IPs tried: $($triedIPs.Count)" -ForegroundColor White
+        Write-Host ""
+        Write-Host "    Last resort:" -ForegroundColor Yellow
+        Write-Host "      1. Use mobile hotspot from phone" -ForegroundColor White
+        Write-Host "      2. Restart your router (power off 30s)" -ForegroundColor White
+        Write-Host "      3. Wait 30-60 min for rate limit to clear" -ForegroundColor White
+        Write-Host "  ============================================" -ForegroundColor Red
+        Write-Host ""
+
+        Write-AutoClawLog -OldIP $oldIP -NewIP "all-failed" -Method $PreferredMethod -Outcome "failed" -Details "IPs tried: $($triedIPs.Count), Methods: $($methods -join ',')"
+        return $false
+    }
+}
+
+# ==================================================================
 #  MAIN
 # ==================================================================
 
 switch ($Action) {
-    "change"  { Invoke-ChangeIP -TargetUrl $Url -PreferredMethod $Method }
-    "restore" { Invoke-RestoreIP }
-    "status"  { Show-Status }
-    "test"    { Invoke-TestUrl -TargetUrl $Url }
-    "setup"   { Invoke-VPNCredentialSetup -VPNMethod $Method }
+    "change"        { Invoke-ChangeIP -TargetUrl $Url -PreferredMethod $Method }
+    "restore"       { Invoke-RestoreIP }
+    "status"        { Show-Status }
+    "test"          { Invoke-TestUrl -TargetUrl $Url }
+    "setup"         { Invoke-VPNCredentialSetup -VPNMethod $Method }
+    "fix-autoclaw"  { Invoke-FixAutoClaw -PreferredMethod $Method -ClearSession (-not $SkipAutoClawClear) }
 }
