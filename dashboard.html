@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPSwitch Monitor</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --text: #1a1a1a;
+    --dim: #666;
+    --line: #ddd;
+    --link: #0000EE;
+    --green: #006600;
+    --red: #990000;
+    --amber: #664400;
+    --mono: "SF Mono", "Consolas", "Liberation Mono", monospace;
+    --sans: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--sans);
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.5;
+    padding: 24px;
+    max-width: 800px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: var(--dim);
+    margin-bottom: 32px;
+  }
+  .section {
+    margin-bottom: 32px;
+  }
+  .section-title {
+    font-size: 14px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 6px;
+    margin-bottom: 12px;
+  }
+  .kv {
+    font-family: var(--mono);
+    font-size: 13px;
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  .kv .label { color: var(--dim); }
+  .kv .value { font-weight: 500; }
+  .status-ok { color: var(--green); }
+  .status-bad { color: var(--red); }
+  .status-warn { color: var(--amber); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: var(--mono);
+  }
+  th {
+    text-align: left;
+    font-weight: 600;
+    padding: 6px 8px;
+    border-bottom: 2px solid var(--line);
+    font-family: var(--sans);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--dim);
+  }
+  td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  .actions {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+  .btn {
+    font-family: var(--sans);
+    font-size: 13px;
+    padding: 8px 16px;
+    border: 1px solid var(--text);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+  }
+  .btn:hover {
+    background: var(--text);
+    color: var(--bg);
+  }
+  .btn-primary {
+    background: var(--text);
+    color: var(--bg);
+  }
+  .btn-primary:hover {
+    background: #333;
+  }
+  .log-entry {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 3px 0;
+    color: var(--dim);
+  }
+  .log-entry .time { color: var(--dim); }
+  .log-entry .level { font-weight: 600; }
+  .log-entry .level-info { color: var(--text); }
+  .log-entry .level-warn { color: var(--amber); }
+  .log-entry .level-error { color: var(--red); }
+  .log-entry .level-success { color: var(--green); }
+  .log-container {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    padding: 8px 12px;
+  }
+  .empty { color: var(--dim); font-style: italic; font-size: 13px; }
+  .refresh-note {
+    font-size: 11px;
+    color: var(--dim);
+    margin-top: 8px;
+  }
+  a { color: var(--link); }
+</style>
+</head>
+<body>
+
+<h1>IPSwitch Monitor</h1>
+<p class="subtitle">IP rate-limit recovery dashboard</p>
+
+<div class="actions">
+  <button class="btn btn-primary" onclick="runCommand('check')">Check Now</button>
+  <button class="btn" onclick="runCommand('change')">Force IP Change</button>
+  <button class="btn" onclick="runCommand('revert')">Revert</button>
+  <button class="btn" onclick="loadData()">Refresh</button>
+</div>
+
+<div class="section">
+  <div class="section-title">Current Status</div>
+  <div id="status"><p class="empty">Loading...</p></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Target URLs</div>
+  <div id="targets"><p class="empty">Loading...</p></div>
+</div>
+
+<div class="section">
+  <div class="section-title">IP Change History</div>
+  <div id="history"><p class="empty">Loading...</p></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Recent Log</div>
+  <div id="log" class="log-container"><p class="empty">Loading...</p></div>
+  <p class="refresh-note">Auto-refresh every 10 seconds. Last refresh: <span id="lastRefresh">—</span></p>
+</div>
+
+<script>
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+const scriptDir = __dirname;
+
+function run(cmd) {
+  return new Promise((resolve, reject) => {
+    exec(cmd, { shell: 'powershell.exe', cwd: scriptDir, timeout: 30000 }, (err, stdout, stderr) => {
+      if (err && !stdout) { reject(stderr || err.message); }
+      else { resolve(stdout || ''); }
+    });
+  });
+}
+
+async function runCommand(mode) {
+  const btns = document.querySelectorAll('.btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    if (mode === 'revert') {
+      await run('powershell -ExecutionPolicy Bypass -File IPSwitch.ps1 -Revert');
+    } else {
+      await run(`powershell -ExecutionPolicy Bypass -File IPSwitch.ps1 -Mode ${mode}`);
+    }
+  } catch(e) { /* ignore */ }
+  btns.forEach(b => b.disabled = false);
+  loadData();
+}
+
+async function loadData() {
+  // Load config
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(path.join(scriptDir, 'config.json'), 'utf8'));
+  } catch(e) {
+    document.getElementById('status').innerHTML = '<p class="empty">config.json not found</p>';
+    return;
+  }
+
+  // Get current IP
+  let currentIP = '—';
+  try {
+    const ipOut = await run('powershell -Command "(Invoke-RestMethod -Uri \'https://api.ipify.org?format=json\' -TimeoutSec 10).ip"');
+    currentIP = ipOut.trim();
+  } catch(e) {}
+
+  // Get local adapters
+  let adapters = '';
+  try {
+    adapters = await run('powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq \'Up\'} | ForEach-Object { $ip = (Get-NetIPAddress -InterfaceAlias $_.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress; $dhcp = (Get-NetIPInterface -InterfaceAlias $_.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp; Write-Output ($_.Name + \'^\' + $ip + \'^\' + $dhcp) }"');
+  } catch(e) {}
+
+  // Check if state file exists (can revert)
+  const stateExists = fs.existsSync(path.join(scriptDir, 'logs', 'state.json'));
+
+  // Render status
+  let statusHtml = '';
+  statusHtml += `<div class="kv"><span class="label">Public IP</span><span class="value ${currentIP !== '—' ? 'status-ok' : 'status-bad'}">${currentIP}</span></div>`;
+  if (adapters.trim()) {
+    adapters.trim().split('\n').forEach(line => {
+      const [name, ip, dhcp] = line.trim().split('^');
+      if (name) {
+        statusHtml += `<div class="kv"><span class="label">${name}</span><span class="value">${ip || '—'} (${dhcp || '—'})</span></div>`;
+      }
+    });
+  }
+  statusHtml += `<div class="kv"><span class="label">Revert available</span><span class="value ${stateExists ? 'status-ok' : 'status-warn'}">${stateExists ? 'Yes' : 'No'}</span></div>`;
+  document.getElementById('status').innerHTML = statusHtml;
+
+  // Check targets
+  const targetsDiv = document.getElementById('targets');
+  if (config.target_urls && config.target_urls.length > 0) {
+    let html = '<table><thead><tr><th>URL</th><th>Status</th><th>Details</th></tr></thead><tbody>';
+    for (const url of config.target_urls) {
+      let status = '—';
+      let statusClass = 'status-warn';
+      let detail = '';
+      try {
+        const resp = await run(`powershell -Command "try { $r = Invoke-WebRequest -Uri '${url}' -TimeoutSec ${config.rate_limit_signals.timeout_seconds} -UseBasicParsing -ErrorAction Stop; Write-Output ($r.StatusCode.ToString() + '^OK') } catch { $code = 0; if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }; if (${config.rate_limit_signals.http_status_codes} -contains $code) { Write-Output ($code.ToString() + '^RATE_LIMITED') } else { Write-Output ('0^ERROR: ' + $_.Exception.Message) } }"`);
+        const [code, result] = resp.trim().split('^');
+        if (result === 'OK') {
+          status = `HTTP ${code}`;
+          statusClass = 'status-ok';
+        } else if (result === 'RATE_LIMITED') {
+          status = `HTTP ${code}`;
+          statusClass = 'status-bad';
+        } else {
+          status = 'Error';
+          statusClass = 'status-bad';
+          detail = result.replace('ERROR: ', '').substring(0, 60);
+        }
+      } catch(e) {
+        status = 'Failed';
+        statusClass = 'status-bad';
+      }
+      html += `<tr><td>${url}</td><td class="${statusClass}">${status}</td><td>${detail}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    targetsDiv.innerHTML = html;
+  } else {
+    targetsDiv.innerHTML = '<p class="empty">No target URLs configured</p>';
+  }
+
+  // Load activity log
+  const logFile = path.join(scriptDir, 'logs', 'activity_log.csv');
+  if (fs.existsSync(logFile)) {
+    const content = fs.readFileSync(logFile, 'utf8');
+    const lines = content.trim().split('\n');
+    if (lines.length > 1) {
+      let html = '<table><thead><tr><th>Time</th><th>Old IP</th><th>New IP</th><th>Method</th><th>Target</th><th>Result</th></tr></thead><tbody>';
+      const dataLines = lines.slice(1).reverse().slice(0, 20);
+      for (const line of dataLines) {
+        const parts = line.match(/(?:^|,)(?:"([^"]*)"/g);
+        if (parts && parts.length >= 6) {
+          const clean = parts.map(p => p.replace(/(?:^,"|"$)/g, '').replace(/""/g, '"'));
+          const outcomeClass = clean[5] === 'success' ? 'status-ok' : (clean[5] === 'failed' ? 'status-bad' : 'status-warn');
+          html += `<tr><td>${clean[0]}</td><td>${clean[1]}</td><td>${clean[2]}</td><td>${clean[3]}</td><td>${clean[4].substring(0,40)}</td><td class="${outcomeClass}">${clean[5]}</td></tr>`;
+        }
+      }
+      html += '</tbody></table>';
+      document.getElementById('history').innerHTML = html;
+    } else {
+      document.getElementById('history').innerHTML = '<p class="empty">No IP changes recorded yet</p>';
+    }
+  } else {
+    document.getElementById('history').innerHTML = '<p class="empty">No activity log file</p>';
+  }
+
+  // Load recent log
+  const dashLog = path.join(scriptDir, 'logs', 'dashboard.json');
+  if (fs.existsSync(dashLog)) {
+    const content = fs.readFileSync(dashLog, 'utf8').trim();
+    if (content) {
+      const lines = content.split('\n').reverse().slice(0, 30);
+      let html = '';
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+          const levelClass = `level-${entry.outcome === 'success' ? 'success' : (entry.outcome === 'failed' ? 'error' : 'warn')}`;
+          html += `<div class="log-entry"><span class="time">${entry.timestamp}</span> <span class="level ${levelClass}">[${entry.outcome.toUpperCase()}]</span> ${entry.method}: ${entry.old_ip} → ${entry.new_ip || '—'} (${entry.target || '—'})</div>`;
+        } catch(e) {}
+      }
+      document.getElementById('log').innerHTML = html || '<p class="empty">No log entries</p>';
+    } else {
+      document.getElementById('log').innerHTML = '<p class="empty">No log entries</p>';
+    }
+  } else {
+    document.getElementById('log').innerHTML = '<p class="empty">No log file yet</p>';
+  }
+
+  document.getElementById('lastRefresh').textContent = new Date().toLocaleTimeString();
+}
+
+loadData();
+setInterval(loadData, 10000);
+</script>
+
+</body>
+</html>
