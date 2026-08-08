@@ -1,44 +1,36 @@
-<#
+﻿<#
 .SYNOPSIS
   Device IP Manager - Change / Restore device IP to bypass API or website restrictions
 .DESCRIPTION
-  A standalone, general-purpose IP bypass tool. When your current IP is blocked
-  or rate-limited by an API or website, this script changes your device IP using
-  Cloudflare WARP, ProtonVPN, Windscribe, PrivadoVPN, or DHCP renewal, then tests
-  whether the target is accessible from the new IP.
-
-  Restore mode puts everything back to normal — disconnects the active VPN,
-  renews DHCP, and verifies your original connection is back.
-
-  Does NOT modify any existing IPSwitch scripts. Fully self-contained.
+  Supports: Cloudflare WARP, ProtonVPN, Windscribe, PrivadoVPN, DHCP
+  - Auto-installs missing VPNs via winget
+  - One-time credential setup per VPN (saved locally, auto-login after that)
+  - Auto mode tries all VPNs in sequence
 
 .PARAMETER Action
   "change"   - Change IP now (default)
   "restore"  - Restore original IP
   "status"   - Show current IP and connectivity
   "test"     - Test a specific URL from current IP
-
-.PARAMETER Url
-  Target URL to test (for "change" and "test" modes).
+  "setup"    - Run one-time VPN credential setup
 
 .PARAMETER Method
-  "warp"      - Cloudflare WARP with fresh registration (default)
-  "proton"    - ProtonVPN CLI
-  "windscribe" - Windscribe CLI
-  "privado"   - PrivadoVPN CLI
-  "dhcp"      - DHCP release/renew (may not work under CGNAT)
-  "auto"      - Try WARP first, then ProtonVPN, Windscribe, PrivadoVPN, DHCP
+  "warp"       - Cloudflare WARP (default)
+  "proton"     - ProtonVPN
+  "windscribe" - Windscribe
+  "privado"    - PrivadoVPN
+  "dhcp"       - DHCP release/renew
+  "auto"       - Try all VPNs in order
 
 .EXAMPLE
-  .\device-ip-manager.ps1 -Action change -Url "https://api.example.com"
+  .\device-ip-manager.ps1 -Action setup -Method proton
   .\device-ip-manager.ps1 -Action change -Method proton
+  .\device-ip-manager.ps1 -Action change -Method auto
   .\device-ip-manager.ps1 -Action restore
-  .\device-ip-manager.ps1 -Action status
-  .\device-ip-manager.ps1 -Action test -Url "https://api.example.com"
 #>
 
 param(
-    [ValidateSet("change","restore","status","test")]
+    [ValidateSet("change","restore","status","test","setup")]
     [string]$Action = "change",
     [string]$Url = "",
     [ValidateSet("warp","proton","windscribe","privado","dhcp","auto")]
@@ -54,9 +46,35 @@ $WARP_CLI = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
 $PROTON_CLI = "protonvpn-cli"
 $WINDSCRIBE_CLI = "C:\Program Files\Windscribe\windscribe-cli.exe"
 $PRIVADO_CLI = "privadovpn"
+
 $StateFile = Join-Path $ScriptDir "logs\device-ip-state.json"
 $LogFile = Join-Path $ScriptDir "logs\device-ip-manager.log"
+$CredFile = Join-Path $ScriptDir "logs\vpn-credentials.json"
 $MaxVPNRetries = 5
+
+# winget package IDs
+$WingetIDs = @{
+    warp       = "Cloudflare.CloudflareWARP"
+    proton     = "Proton.ProtonVPN"
+    windscribe = "Windscribe.Windscribe"
+    privado    = "PrivadoNetworksAG.PrivadoVPN"
+}
+
+# Install URLs (for manual fallback)
+$InstallUrls = @{
+    warp       = "https://1.1.1.1/"
+    proton     = "https://protonvpn.com/"
+    windscribe = "https://windscribe.com/"
+    privado    = "https://privadovpn.com/"
+}
+
+# VPN display names
+$VPNNames = @{
+    warp       = "Cloudflare WARP"
+    proton     = "ProtonVPN"
+    windscribe = "Windscribe"
+    privado    = "PrivadoVPN"
+}
 
 # Ensure logs directory exists
 $logDir = Split-Path -Parent $LogFile
@@ -96,17 +114,43 @@ function Get-PublicIP {
     return $null
 }
 
+# === Credential Management ===
+function Load-Credentials {
+    if (Test-Path $CredFile) {
+        try {
+            return Get-Content $CredFile -Raw | ConvertFrom-Json
+        } catch { return $null }
+    }
+    return $null
+}
+
+function Save-Credentials {
+    param([hashtable]$Creds)
+    $Creds | ConvertTo-Json -Depth 3 | Set-Content -Path $CredFile -Force
+    # Set file to hidden so it's not easily visible
+    (Get-Item $CredFile).Attributes = 'Hidden'
+    Write-Log "VPN credentials saved to $CredFile" "info"
+}
+
+function Get-VPNCredential {
+    param([string]$VPNMethod, [object]$StoredCreds)
+    if ($StoredCreds -and $StoredCreds.$VPNMethod) {
+        return $StoredCreds.$VPNMethod
+    }
+    return $null
+}
+
 # === Save / Load / Clear State ===
 function Save-State {
     param([string]$OriginalIP, [string]$MethodUsed, [hashtable]$Extra = @{})
     $state = @{
-        timestamp    = (Get-Date -Format "o")
-        original_ip  = $OriginalIP
-        method       = $MethodUsed
-        warp_active  = $Extra.WarpActive
-        proton_active = $Extra.ProtonActive
-        windscribe_active = $Extra.WindscribeActive
-        privado_active = $Extra.PrivadoActive
+        timestamp          = (Get-Date -Format "o")
+        original_ip        = $OriginalIP
+        method             = $MethodUsed
+        warp_active        = $Extra.WarpActive
+        proton_active      = $Extra.ProtonActive
+        windscribe_active  = $Extra.WindscribeActive
+        privado_active     = $Extra.PrivadoActive
     }
     $state | ConvertTo-Json -Depth 3 | Set-Content -Path $StateFile -Force
     Write-Log "State saved: original IP=$OriginalIP, method=$MethodUsed" "info"
@@ -126,35 +170,26 @@ function Clear-State {
 # === Test URL Accessibility ===
 function Test-UrlAccessible {
     param([string]$TargetUrl, [int]$Timeout = 15)
-
     if (-not $TargetUrl) { return @{ Accessible = $true; Reason = "No URL specified" } }
-
     try {
         $response = Invoke-WebRequest -Uri $TargetUrl -TimeoutSec $Timeout -UseBasicParsing -ErrorAction Stop -MaximumRedirection 5
         $code = $response.StatusCode
-
         if ($code -eq 429) { return @{ Accessible = $false; Reason = "HTTP 429 Rate Limited" } }
         if ($code -eq 403) { return @{ Accessible = $false; Reason = "HTTP 403 Forbidden" } }
         if ($code -eq 503) { return @{ Accessible = $false; Reason = "HTTP 503 Service Unavailable" } }
-
         $body = $response.Content.ToLower()
         $blockPatterns = @("rate limit", "too many requests", "access denied", "temporarily blocked", "captcha", "forbidden", "quota exceeded")
         foreach ($p in $blockPatterns) {
-            if ($body -match $p) {
-                return @{ Accessible = $false; Reason = "Block pattern detected: $p" }
-            }
+            if ($body -match $p) { return @{ Accessible = $false; Reason = "Block pattern: $p" } }
         }
-
         return @{ Accessible = $true; Reason = "HTTP $code OK" }
     } catch [System.Net.WebException] {
         $status = 0
-        if ($_.Exception.Response) {
-            $status = [int]$_.Exception.Response.StatusCode
-        }
+        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
         if ($status -eq 429) { return @{ Accessible = $false; Reason = "HTTP 429 Rate Limited" } }
         if ($status -eq 403) { return @{ Accessible = $false; Reason = "HTTP 403 Forbidden" } }
         if ($status -eq 503) { return @{ Accessible = $false; Reason = "HTTP 503 Service Unavailable" } }
-        if ($status -eq 401) { return @{ Accessible = $true; Reason = "HTTP 401 (reachable, auth needed)" } }
+        if ($status -eq 401) { return @{ Accessible = $true; Reason = "HTTP 401 (reachable)" } }
         if ($status -eq 0) { return @{ Accessible = $false; Reason = "Connection error / timeout" } }
         return @{ Accessible = $false; Reason = "HTTP $status" }
     } catch {
@@ -170,13 +205,310 @@ function Flush-DNS {
 }
 
 # ==================================================================
+#  AUTO-INSTALL via winget
+# ==================================================================
+
+function Install-VPN {
+    param([string]$VPNMethod)
+
+    $pkgId = $WingetIDs[$VPNMethod]
+    $vpnName = $VPNNames[$VPNMethod]
+
+    Write-Log "$vpnName not installed. Auto-installing via winget..." "warn"
+    Write-Host ""
+    Write-Host "  ============================================" -ForegroundColor Yellow
+    Write-Host "    Installing $vpnName" -ForegroundColor Yellow
+    Write-Host "  ============================================" -ForegroundColor Yellow
+    Write-Host ""
+
+    try {
+        $result = Start-Process -FilePath "winget" -ArgumentList "install", "--id", $pkgId, "--accept-package-agreements", "--accept-source-agreements", "-e" -Wait -NoNewWindow -PassThru 2>&1
+
+        if ($result.ExitCode -eq 0) {
+            Write-Log "$vpnName installed successfully!" "success"
+            Write-Log "Waiting 5 seconds for installation to settle..." "info"
+            Start-Sleep -Seconds 5
+            return $true
+        } else {
+            Write-Log "winget install exited with code $($result.ExitCode)" "warn"
+        }
+    } catch {
+        Write-Log "winget install failed: $($_.Exception.Message)" "error"
+    }
+
+    # Fallback: open download page
+    Write-Log "Auto-install failed. Opening download page..." "warn"
+    $url = $InstallUrls[$VPNMethod]
+    Start-Process $url
+    Write-Host ""
+    Write-Host "  Please download and install $vpnName from the browser." -ForegroundColor Yellow
+    Write-Host "  After installation, run this script again." -ForegroundColor Yellow
+    Write-Host ""
+    return $false
+}
+
+# ==================================================================
+#  VPN INSTALL CHECKS (with auto-install)
+# ==================================================================
+
+function Test-WARPInstalled {
+    return (Test-Path $WARP_CLI)
+}
+
+function Test-ProtonVPNInstalled {
+    $result = Get-Command $PROTON_CLI -ErrorAction SilentlyContinue
+    if ($result) { return $true }
+    $paths = @(
+        "C:\Program Files\ProtonVPN\protonvpn-cli.exe",
+        "$env:LOCALAPPDATA\ProtonVPN\protonvpn-cli.exe",
+        "$env:USERPROFILE\AppData\Local\Programs\ProtonVPN\protonvpn-cli.exe"
+    )
+    foreach ($p in $paths) { if (Test-Path $p) { return $true } }
+    return $false
+}
+
+function Get-ProtonCLI {
+    $result = Get-Command $PROTON_CLI -ErrorAction SilentlyContinue
+    if ($result) { return $PROTON_CLI }
+    $paths = @(
+        "C:\Program Files\ProtonVPN\protonvpn-cli.exe",
+        "$env:LOCALAPPDATA\ProtonVPN\protonvpn-cli.exe",
+        "$env:USERPROFILE\AppData\Local\Programs\ProtonVPN\protonvpn-cli.exe"
+    )
+    foreach ($p in $paths) { if (Test-Path $p) { return $p } }
+    return $PROTON_CLI
+}
+
+function Test-WindscribeInstalled {
+    if (Test-Path $WINDSCRIBE_CLI) { return $true }
+    $altPaths = @(
+        "C:\Program Files (x86)\Windscribe\windscribe-cli.exe",
+        "$env:LOCALAPPDATA\Windscribe\windscribe-cli.exe"
+    )
+    foreach ($p in $altPaths) { if (Test-Path $p) { return $true } }
+    $result = Get-Command "windscribe" -ErrorAction SilentlyContinue
+    if ($result) { return $true }
+    return $false
+}
+
+function Get-WindscribeCLI {
+    if (Test-Path $WINDSCRIBE_CLI) { return $WINDSCRIBE_CLI }
+    $altPaths = @(
+        "C:\Program Files (x86)\Windscribe\windscribe-cli.exe",
+        "$env:LOCALAPPDATA\Windscribe\windscribe-cli.exe"
+    )
+    foreach ($p in $altPaths) { if (Test-Path $p) { return $p } }
+    return "windscribe"
+}
+
+function Test-PrivadoInstalled {
+    $result = Get-Command $PRIVADO_CLI -ErrorAction SilentlyContinue
+    if ($result) { return $true }
+    $paths = @(
+        "C:\Program Files\PrivadoVPN\privadovpn.exe",
+        "C:\Program Files\PrivadoVPN\privadovpn-cli.exe",
+        "$env:LOCALAPPDATA\PrivadoVPN\privadovpn.exe"
+    )
+    foreach ($p in $paths) { if (Test-Path $p) { return $true } }
+    return $false
+}
+
+function Get-PrivadoCLI {
+    $result = Get-Command $PRIVADO_CLI -ErrorAction SilentlyContinue
+    if ($result) { return $PRIVADO_CLI }
+    $paths = @(
+        "C:\Program Files\PrivadoVPN\privadovpn.exe",
+        "C:\Program Files\PrivadoVPN\privadovpn-cli.exe",
+        "$env:LOCALAPPDATA\PrivadoVPN\privadovpn.exe"
+    )
+    foreach ($p in $paths) { if (Test-Path $p) { return $p } }
+    return $PRIVADO_CLI
+}
+
+function Test-VPNInstalled {
+    param([string]$VPNMethod)
+    switch ($VPNMethod) {
+        "warp"       { return (Test-WARPInstalled) }
+        "proton"     { return (Test-ProtonVPNInstalled) }
+        "windscribe" { return (Test-WindscribeInstalled) }
+        "privado"    { return (Test-PrivadoInstalled) }
+        "dhcp"       { return $true }
+        default      { return $false }
+    }
+}
+
+function Ensure-VPNInstalled {
+    param([string]$VPNMethod, [bool]$AutoInstall = $true)
+
+    if (Test-VPNInstalled -VPNMethod $VPNMethod) { return $true }
+
+    if (-not $AutoInstall) {
+        Write-Log "$($VPNNames[$VPNMethod]) not installed." "warn"
+        return $false
+    }
+
+    # WARP needs no credentials - just install and use
+    if ($VPNMethod -eq "warp") {
+        $installed = Install-VPN -VPNMethod $VPNMethod
+        return $installed
+    }
+
+    # Other VPNs need credentials - install first, then prompt for setup
+    $installed = Install-VPN -VPNMethod $VPNMethod
+    if (-not $installed) { return $false }
+
+    # Check if we already have credentials
+    $creds = Load-Credentials
+    $hasCred = Get-VPNCredential -VPNMethod $VPNMethod -StoredCreds $creds
+
+    if (-not $hasCred) {
+        Write-Log "$($VPNNames[$VPNMethod]) installed but needs login credentials." "warn"
+        Write-Log "Run: .\device-ip-manager.ps1 -Action setup -Method $VPNMethod" "info"
+        Write-Host ""
+        Write-Host "  $vpnName needs your login credentials to auto-connect." -ForegroundColor Yellow
+        Write-Host "  Run setup first:" -ForegroundColor White
+        Write-Host "    .\device-ip-manager.ps1 -Action setup -Method $VPNMethod" -ForegroundColor White
+        Write-Host ""
+        return $false
+    }
+
+    return $true
+}
+
+# ==================================================================
+#  CREDENTIAL SETUP (one-time per VPN)
+# ==================================================================
+
+function Invoke-VPNCredentialSetup {
+    param([string]$VPNMethod)
+
+    $vpnName = $VPNNames[$VPNMethod]
+    Write-Host ""
+    Write-Host "  ============================================" -ForegroundColor Cyan
+    Write-Host "    $vpnName - One-Time Setup" -ForegroundColor Cyan
+    Write-Host "  ============================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  This will save your $vpnName login so the script can" -ForegroundColor White
+    Write-Host "  auto-connect in the future (just like WARP)." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Your credentials are stored locally in:" -ForegroundColor DarkGray
+    Write-Host "    $CredFile" -ForegroundColor DarkGray
+    Write-Host "  The file is hidden and stays on this machine only." -ForegroundColor DarkGray
+    Write-Host ""
+
+    # Ensure VPN is installed first
+    if (-not (Test-VPNInstalled -VPNMethod $VPNMethod)) {
+        Write-Log "$vpnName not installed. Installing first..." "info"
+        $installed = Install-VPN -VPNMethod $VPNMethod
+        if (-not $installed) {
+            Write-Log "Cannot setup - $vpnName not installed." "error"
+            return $false
+        }
+    }
+
+    # Load existing credentials
+    $creds = Load-Credentials
+    if ($null -eq $creds) { $creds = @{} }
+
+    $username = ""
+    $password = ""
+
+    switch ($VPNMethod) {
+        "proton" {
+            Write-Host "  ProtonVPN uses your Proton account email + password." -ForegroundColor White
+            Write-Host "  Sign up free at https://protonvpn.com/ if you need an account." -ForegroundColor DarkGray
+            Write-Host ""
+            $username = Read-Host "  ProtonVPN email"
+            $password = Read-Host "  ProtonVPN password" -AsSecureString
+            $plainPassword = [System.Net.NetworkCredential]::new("", $password).Password
+
+            # Login via CLI
+            Write-Log "Logging into ProtonVPN..." "info"
+            $cli = Get-ProtonCLI
+            try {
+                # protonvpn-cli login uses interactive prompt
+                $inputStr = "$username`n$plainPassword"
+                $proc = Start-Process -FilePath $cli -ArgumentList "login" -NoNewWindow -PassThru -RedirectStandardInput "$env:TEMP\proton_input.txt"
+                Set-Content -Path "$env:TEMP\proton_input.txt" -Value $inputStr -NoNewline
+                Start-Process -FilePath $cli -ArgumentList "login", $username -NoNewWindow -Wait -ErrorAction SilentlyContinue 2>&1 | Out-Null
+            } catch {
+                Write-Log "CLI login may have failed. You might need to login manually once." -ForegroundColor Yellow
+            }
+
+            # Save credentials for future use
+            $creds | Add-Member -NotePropertyName "proton" -NotePropertyValue @{ username = $username; password = $plainPassword } -Force
+        }
+
+        "windscribe" {
+            Write-Host "  Windscribe uses your Windscribe account email + password." -ForegroundColor White
+            Write-Host "  Sign up free at https://windscribe.com/ if you need an account." -ForegroundColor DarkGray
+            Write-Host ""
+            $username = Read-Host "  Windscribe email"
+            $password = Read-Host "  Windscribe password" -AsSecureString
+            $plainPassword = [System.Net.NetworkCredential]::new("", $password).Password
+
+            # Login via CLI
+            Write-Log "Logging into Windscribe..." "info"
+            $cli = Get-WindscribeCLI
+            try {
+                & $cli account login $username $plainPassword 2>&1 | Out-Null
+                Start-Sleep -Seconds 2
+            } catch {
+                Write-Log "CLI login may have failed. You might need to login manually once." -ForegroundColor Yellow
+            }
+
+            $creds | Add-Member -NotePropertyName "windscribe" -NotePropertyValue @{ username = $username; password = $plainPassword } -Force
+        }
+
+        "privado" {
+            Write-Host "  PrivadoVPN uses your Privado account email + password." -ForegroundColor White
+            Write-Host "  Sign up free at https://privadovpn.com/ if you need an account." -ForegroundColor DarkGray
+            Write-Host ""
+            $username = Read-Host "  PrivadoVPN email"
+            $password = Read-Host "  PrivadoVPN password" -AsSecureString
+            $plainPassword = [System.Net.NetworkCredential]::new("", $password).Password
+
+            # Login via CLI
+            Write-Log "Logging into PrivadoVPN..." "info"
+            $cli = Get-PrivadoCLI
+            try {
+                & $cli login $username $plainPassword 2>&1 | Out-Null
+                Start-Sleep -Seconds 2
+            } catch {
+                Write-Log "CLI login may have failed. You might need to login manually once." -ForegroundColor Yellow
+            }
+
+            $creds | Add-Member -NotePropertyName "privado" -NotePropertyValue @{ username = $username; password = $plainPassword } -Force
+        }
+
+        "warp" {
+            Write-Host "  WARP needs no credentials - it auto-registers." -ForegroundColor Green
+            Write-Host "  Just install and use. No setup needed." -ForegroundColor Green
+            return $true
+        }
+
+        default {
+            Write-Log "Unknown VPN method: $VPNMethod" "error"
+            return $false
+        }
+    }
+
+    # Save credentials
+    Save-Credentials -Creds $creds
+    Write-Host ""
+    Write-Log "$vpnName setup complete! You can now use -Method $VPNMethod without logging in again." "success"
+    Write-Host ""
+    return $true
+}
+
+# ==================================================================
 #  WARP
 # ==================================================================
 
 function Connect-WARP-FreshIP {
-    if (-not (Test-Path $WARP_CLI)) {
-        Write-Log "Cloudflare WARP not found at $WARP_CLI" "error"
-        return $null
+    if (-not (Test-WARPInstalled)) {
+        $installed = Install-VPN -VPNMethod "warp"
+        if (-not $installed) { return $null }
     }
 
     & $WARP_CLI disconnect 2>&1 | Out-Null
@@ -192,94 +524,99 @@ function Connect-WARP-FreshIP {
         $status = & $WARP_CLI status 2>&1
         if ($status -match "Connected") {
             Start-Sleep -Seconds 2
-            $newIP = Get-PublicIP
-            return $newIP
+            return (Get-PublicIP)
         }
     }
     return $null
 }
 
 function Disconnect-WARP {
-    if (-not (Test-Path $WARP_CLI)) { return }
+    if (-not (Test-WARPInstalled)) { return }
     Write-Log "Disconnecting Cloudflare WARP..." "info"
     & $WARP_CLI disconnect 2>&1 | Out-Null
     Start-Sleep -Seconds 3
-    $status = & $WARP_CLI status 2>&1
-    if ($status -match "Disconnected") {
-        Write-Log "WARP disconnected." "success"
-    } else {
-        Write-Log "WARP may still be connected: $status" "warn"
-    }
 }
 
 # ==================================================================
-#  ProtonVPN
+#  ProtonVPN (with auto-login using saved credentials)
 # ==================================================================
-
-function Test-ProtonVPNInstalled {
-    $result = Get-Command $PROTON_CLI -ErrorAction SilentlyContinue
-    if ($result) { return $true }
-    # Check common install paths
-    $paths = @(
-        "C:\Program Files\ProtonVPN\protonvpn-cli.exe",
-        "$env:LOCALAPPDATA\ProtonVPN\protonvpn-cli.exe",
-        "$env:USERPROFILE\AppData\Local\Programs\ProtonVPN\protonvpn-cli.exe"
-    )
-    foreach ($p in $paths) {
-        if (Test-Path $p) { return $true }
-    }
-    return $false
-}
 
 function Connect-ProtonVPN {
     if (-not (Test-ProtonVPNInstalled)) {
-        Write-Log "ProtonVPN CLI not found. Install from https://protonvpn.com/" "error"
+        $installed = Install-VPN -VPNMethod "proton"
+        if (-not $installed) { return $null }
+    }
+
+    # Check for saved credentials
+    $creds = Load-Credentials
+    $protonCred = Get-VPNCredential -VPNMethod "proton" -StoredCreds $creds
+
+    if (-not $protonCred) {
+        Write-Log "ProtonVPN credentials not found. Run setup first:" "warn"
+        Write-Log "  .\device-ip-manager.ps1 -Action setup -Method proton" "info"
         return $null
     }
 
+    $cli = Get-ProtonCLI
     Write-Log "Connecting ProtonVPN (fastest free server)..." "info"
 
     # Disconnect first
-    try { & $PROTON_CLI disconnect 2>&1 | Out-Null } catch {}
+    try { & $cli disconnect 2>&1 | Out-Null } catch {}
     Start-Sleep -Seconds 2
+
+    # Check if already logged in
+    $status = & $cli status 2>&1
+    if ($status -match "not logged in|Not Logged In|please login") {
+        Write-Log "ProtonVPN not logged in. Logging in with saved credentials..." "info"
+        try {
+            # Write credentials to temp file for stdin
+            $inputStr = "$($protonCred.username)`n$($protonCred.password)"
+            $tempInput = "$env:TEMP\proton_login_input.txt"
+            Set-Content -Path $tempInput -Value $inputStr -NoNewline
+            $inputBytes = [System.IO.File]::ReadAllBytes($tempInput)
+            $proc = Start-Process -FilePath $cli -ArgumentList "login" -NoNewWindow -PassThru -RedirectStandardInput $tempInput -Wait -ErrorAction SilentlyContinue
+            Remove-Item $tempInput -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        } catch {
+            Write-Log "Auto-login failed: $($_.Exception.Message)" "warn"
+            return $null
+        }
+    }
 
     # Connect to fastest free server
-    & $PROTON_CLI connect --fastest 2>&1 | Out-Null
+    & $cli connect --fastest 2>&1 | Out-Null
 
-    # Wait for connection (up to 25 seconds)
     for ($i = 0; $i -lt 25; $i++) {
         Start-Sleep -Seconds 1
-        $status = & $PROTON_CLI status 2>&1
+        $status = & $cli status 2>&1
         if ($status -match "Connected") {
             Start-Sleep -Seconds 3
-            $newIP = Get-PublicIP
-            return $newIP
+            return (Get-PublicIP)
         }
     }
 
-    # Fallback: try basic connect without --fastest
-    Write-Log "Fastest server failed, trying basic connect..." "warn"
-    try { & $PROTON_CLI disconnect 2>&1 | Out-Null } catch {}
+    # Fallback: basic connect
+    Write-Log "Fastest failed, trying basic connect..." "warn"
+    try { & $cli disconnect 2>&1 | Out-Null } catch {}
     Start-Sleep -Seconds 2
-    & $PROTON_CLI connect 2>&1 | Out-Null
+    & $cli connect 2>&1 | Out-Null
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Seconds 1
-        $status = & $PROTON_CLI status 2>&1
+        $status = & $cli status 2>&1
         if ($status -match "Connected") {
             Start-Sleep -Seconds 3
-            $newIP = Get-PublicIP
-            return $newIP
+            return (Get-PublicIP)
         }
     }
-
     return $null
 }
 
 function Disconnect-ProtonVPN {
     if (-not (Test-ProtonVPNInstalled)) { return }
+    $cli = Get-ProtonCLI
     Write-Log "Disconnecting ProtonVPN..." "info"
     try {
-        & $PROTON_CLI disconnect 2>&1 | Out-Null
+        & $cli disconnect 2>&1 | Out-Null
         Start-Sleep -Seconds 3
         Write-Log "ProtonVPN disconnected." "success"
     } catch {
@@ -288,43 +625,39 @@ function Disconnect-ProtonVPN {
 }
 
 # ==================================================================
-#  Windscribe
+#  Windscribe (with auto-login using saved credentials)
 # ==================================================================
 
-function Test-WindscribeInstalled {
-    if (Test-Path $WINDSCRIBE_CLI) { return $true }
-    $altPaths = @(
-        "C:\Program Files (x86)\Windscribe\windscribe-cli.exe",
-        "$env:LOCALAPPDATA\Windscribe\windscribe-cli.exe"
-    )
-    foreach ($p in $altPaths) {
-        if (Test-Path $p) { return $true }
-    }
-    $result = Get-Command "windscribe" -ErrorAction SilentlyContinue
-    if ($result) { return $true }
-    return $false
-}
-
-function Get-WindscribeCLI {
-    if (Test-Path $WINDSCRIBE_CLI) { return $WINDSCRIBE_CLI }
-    $altPaths = @(
-        "C:\Program Files (x86)\Windscribe\windscribe-cli.exe",
-        "$env:LOCALAPPDATA\Windscribe\windscribe-cli.exe"
-    )
-    foreach ($p in $altPaths) {
-        if (Test-Path $p) { return $p }
-    }
-    return "windscribe"
-}
-
 function Connect-Windscribe {
-    $cli = Get-WindscribeCLI
     if (-not (Test-WindscribeInstalled)) {
-        Write-Log "Windscribe not found. Install from https://windscribe.com/" "error"
+        $installed = Install-VPN -VPNMethod "windscribe"
+        if (-not $installed) { return $null }
+    }
+
+    $creds = Load-Credentials
+    $wsCred = Get-VPNCredential -VPNMethod "windscribe" -StoredCreds $creds
+
+    if (-not $wsCred) {
+        Write-Log "Windscribe credentials not found. Run setup first:" "warn"
+        Write-Log "  .\device-ip-manager.ps1 -Action setup -Method windscribe" "info"
         return $null
     }
 
+    $cli = Get-WindscribeCLI
     Write-Log "Connecting Windscribe (best location)..." "info"
+
+    # Check if logged in
+    $status = & $cli account 2>&1
+    if ($status -match "not logged in|NOT LOGGED IN|please login") {
+        Write-Log "Windscribe not logged in. Logging in..." "info"
+        try {
+            & $cli account login $wsCred.username $wsCred.password 2>&1 | Out-Null
+            Start-Sleep -Seconds 2
+        } catch {
+            Write-Log "Auto-login failed: $($_.Exception.Message)" "warn"
+            return $null
+        }
+    }
 
     # Disconnect first
     try { & $cli disconnect 2>&1 | Out-Null } catch {}
@@ -333,18 +666,16 @@ function Connect-Windscribe {
     # Connect to best location
     & $cli connect best 2>&1 | Out-Null
 
-    # Wait for connection (up to 25 seconds)
     for ($i = 0; $i -lt 25; $i++) {
         Start-Sleep -Seconds 1
         $status = & $cli status 2>&1
         if ($status -match "Connected") {
             Start-Sleep -Seconds 3
-            $newIP = Get-PublicIP
-            return $newIP
+            return (Get-PublicIP)
         }
     }
 
-    # Fallback: try basic connect
+    # Fallback: basic connect
     Write-Log "Best location failed, trying basic connect..." "warn"
     try { & $cli disconnect 2>&1 | Out-Null } catch {}
     Start-Sleep -Seconds 2
@@ -354,11 +685,9 @@ function Connect-Windscribe {
         $status = & $cli status 2>&1
         if ($status -match "Connected") {
             Start-Sleep -Seconds 3
-            $newIP = Get-PublicIP
-            return $newIP
+            return (Get-PublicIP)
         }
     }
-
     return $null
 }
 
@@ -376,45 +705,39 @@ function Disconnect-Windscribe {
 }
 
 # ==================================================================
-#  PrivadoVPN
+#  PrivadoVPN (with auto-login using saved credentials)
 # ==================================================================
-
-function Test-PrivadoInstalled {
-    $result = Get-Command $PRIVADO_CLI -ErrorAction SilentlyContinue
-    if ($result) { return $true }
-    $paths = @(
-        "C:\Program Files\PrivadoVPN\privadovpn.exe",
-        "C:\Program Files\PrivadoVPN\privadovpn-cli.exe",
-        "$env:LOCALAPPDATA\PrivadoVPN\privadovpn.exe"
-    )
-    foreach ($p in $paths) {
-        if (Test-Path $p) { return $true }
-    }
-    return $false
-}
-
-function Get-PrivadoCLI {
-    $result = Get-Command $PRIVADO_CLI -ErrorAction SilentlyContinue
-    if ($result) { return $PRIVADO_CLI }
-    $paths = @(
-        "C:\Program Files\PrivadoVPN\privadovpn.exe",
-        "C:\Program Files\PrivadoVPN\privadovpn-cli.exe",
-        "$env:LOCALAPPDATA\PrivadoVPN\privadovpn.exe"
-    )
-    foreach ($p in $paths) {
-        if (Test-Path $p) { return $p }
-    }
-    return $PRIVADO_CLI
-}
 
 function Connect-PrivadoVPN {
     if (-not (Test-PrivadoInstalled)) {
-        Write-Log "PrivadoVPN not found. Install from https://privadovpn.com/" "error"
+        $installed = Install-VPN -VPNMethod "privado"
+        if (-not $installed) { return $null }
+    }
+
+    $creds = Load-Credentials
+    $pvCred = Get-VPNCredential -VPNMethod "privado" -StoredCreds $creds
+
+    if (-not $pvCred) {
+        Write-Log "PrivadoVPN credentials not found. Run setup first:" "warn"
+        Write-Log "  .\device-ip-manager.ps1 -Action setup -Method privado" "info"
         return $null
     }
 
     $cli = Get-PrivadoCLI
     Write-Log "Connecting PrivadoVPN..." "info"
+
+    # Check if logged in
+    $status = & $cli status 2>&1
+    if ($status -match "not logged in|NOT LOGGED IN|please login") {
+        Write-Log "PrivadoVPN not logged in. Logging in..." "info"
+        try {
+            & $cli login $pvCred.username $pvCred.password 2>&1 | Out-Null
+            Start-Sleep -Seconds 2
+        } catch {
+            Write-Log "Auto-login failed: $($_.Exception.Message)" "warn"
+            return $null
+        }
+    }
 
     # Disconnect first
     try { & $cli disconnect 2>&1 | Out-Null } catch {}
@@ -423,17 +746,14 @@ function Connect-PrivadoVPN {
     # Connect
     & $cli connect 2>&1 | Out-Null
 
-    # Wait for connection (up to 25 seconds)
     for ($i = 0; $i -lt 25; $i++) {
         Start-Sleep -Seconds 1
         $status = & $cli status 2>&1
         if ($status -match "Connected") {
             Start-Sleep -Seconds 3
-            $newIP = Get-PublicIP
-            return $newIP
+            return (Get-PublicIP)
         }
     }
-
     return $null
 }
 
@@ -456,18 +776,14 @@ function Disconnect-PrivadoVPN {
 
 function Invoke-DHCPChange {
     Write-Log "Starting DHCP release/renew..." "info"
-
     try {
         Write-Log "Releasing DHCP lease..." "info"
         Start-Process -FilePath "ipconfig" -ArgumentList "/release" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\dim_out.txt" -RedirectStandardError "$env:TEMP\dim_err.txt"
         Start-Sleep -Seconds 2
-
         Write-Log "Renewing DHCP lease..." "info"
         Start-Process -FilePath "ipconfig" -ArgumentList "/renew" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\dim_out.txt" -RedirectStandardError "$env:TEMP\dim_err.txt"
         Start-Sleep -Seconds 3
-
-        $newIP = Get-PublicIP
-        return $newIP
+        return (Get-PublicIP)
     } catch {
         Write-Log "DHCP change failed: $($_.Exception.Message)" "error"
         return $null
@@ -479,52 +795,24 @@ function Invoke-DHCPChange {
 # ==================================================================
 
 function Invoke-VPNConnect {
-    param([string]$VPNMethod, [string]$OldIP)
+    param([string]$VPNMethod)
 
     switch ($VPNMethod) {
-        "warp" {
-            $vpnIP = Connect-WARP-FreshIP
-            return @{ IP = $vpnIP; Active = $true }
-        }
-        "proton" {
-            $vpnIP = Connect-ProtonVPN
-            return @{ IP = $vpnIP; Active = $true }
-        }
-        "windscribe" {
-            $vpnIP = Connect-Windscribe
-            return @{ IP = $vpnIP; Active = $true }
-        }
-        "privado" {
-            $vpnIP = Connect-PrivadoVPN
-            return @{ IP = $vpnIP; Active = $true }
-        }
-        default {
-            return @{ IP = $null; Active = $false }
-        }
+        "warp"       { $ip = Connect-WARP-FreshIP; return @{ IP = $ip; Active = $true } }
+        "proton"     { $ip = Connect-ProtonVPN; return @{ IP = $ip; Active = $true } }
+        "windscribe" { $ip = Connect-Windscribe; return @{ IP = $ip; Active = $true } }
+        "privado"    { $ip = Connect-PrivadoVPN; return @{ IP = $ip; Active = $true } }
+        default      { return @{ IP = $null; Active = $false } }
     }
 }
 
 function Invoke-VPNDisconnect {
     param([string]$VPNMethod)
-
     switch ($VPNMethod) {
         "warp"       { Disconnect-WARP }
         "proton"     { Disconnect-ProtonVPN }
         "windscribe" { Disconnect-Windscribe }
         "privado"    { Disconnect-PrivadoVPN }
-    }
-}
-
-function Test-VPNInstalled {
-    param([string]$VPNMethod)
-
-    switch ($VPNMethod) {
-        "warp"       { return (Test-Path $WARP_CLI) }
-        "proton"     { return (Test-ProtonVPNInstalled) }
-        "windscribe" { return (Test-WindscribeInstalled) }
-        "privado"    { return (Test-PrivadoInstalled) }
-        "dhcp"       { return $true }
-        default      { return $false }
     }
 }
 
@@ -541,31 +829,24 @@ function Invoke-ChangeIP {
     Write-Host "  ============================================" -ForegroundColor Cyan
     Write-Host ""
 
-    # Step 1: Get current IP
     Write-Log "Step 1: Checking current connection..." "info"
     $oldIP = Get-PublicIP
-
     if (-not $oldIP) {
         Write-Log "No internet connection! Cannot proceed." "error"
         return $false
     }
-
     Write-Log "Current IP: $oldIP" "info"
 
-    # Test target URL if provided
     if ($TargetUrl) {
         $testResult = Test-UrlAccessible -TargetUrl $TargetUrl
         if ($testResult.Accessible) {
-            Write-Log "Target is already accessible: $($testResult.Reason)" "success"
-            Write-Log "No IP change needed." "info"
+            Write-Log "Target already accessible: $($testResult.Reason)" "success"
             return $true
         } else {
             Write-Log "Target is blocked: $($testResult.Reason)" "warn"
-            Write-Log "Proceeding with IP change to bypass restriction..." "info"
         }
     }
 
-    # Step 2: Change IP
     Write-Host ""
     Write-Log "Step 2: Changing IP..." "info"
 
@@ -580,71 +861,80 @@ function Invoke-ChangeIP {
 
     $newIP = $null
     $usedMethod = $null
-    $vpnActiveFlags = @{
-        warp = $false; proton = $false; windscribe = $false; privado = $false
-    }
+    $vpnActiveFlags = @{ warp = $false; proton = $false; windscribe = $false; privado = $false }
 
     foreach ($m in $methods) {
         Write-Host ""
         Write-Log "Trying method: $m" "info"
 
-        # Check if this VPN is installed
-        if (-not (Test-VPNInstalled -VPNMethod $m)) {
-            $installUrls = @{
-                warp       = "https://1.1.1.1/"
-                proton     = "https://protonvpn.com/"
-                windscribe = "https://windscribe.com/"
-                privado    = "https://privadovpn.com/"
-            }
-            $url = $installUrls[$m]
-            Write-Log "$m not installed. Install from $url" "warn"
-            continue
-        }
-
-        # For non-DHCP methods, try multiple retries
         if ($m -eq "dhcp") {
             $dhcpIP = Invoke-DHCPChange
             if ($dhcpIP -and $dhcpIP -ne $oldIP) {
                 Write-Log "IP changed via DHCP: $oldIP -> $dhcpIP" "success"
                 $newIP = $dhcpIP
                 $usedMethod = "dhcp"
-
                 if ($TargetUrl) {
                     Start-Sleep -Seconds 2
                     $retest = Test-UrlAccessible -TargetUrl $TargetUrl
                     if ($retest.Accessible) {
-                        Write-Log "Target is now accessible! $($retest.Reason)" "success"
+                        Write-Log "Target accessible! $($retest.Reason)" "success"
                     } else {
-                        Write-Log "Target still blocked after DHCP change: $($retest.Reason)" "warn"
+                        Write-Log "Still blocked: $($retest.Reason)" "warn"
                         $newIP = $null
                         continue
                     }
                 }
                 break
             } elseif ($dhcpIP -eq $oldIP) {
-                Write-Log "DHCP didn't change public IP (CGNAT likely). IP: $dhcpIP" "warn"
+                Write-Log "DHCP did not change public IP (CGNAT likely)." "warn"
             } else {
                 Write-Log "DHCP change failed." "error"
             }
             continue
         }
 
-        # VPN methods (warp, proton, windscribe, privado)
+        # VPN methods - auto-install if missing
+        if (-not (Test-VPNInstalled -VPNMethod $m)) {
+            Write-Log "$($VPNNames[$m]) not installed. Auto-installing..." "warn"
+            $installed = Install-VPN -VPNMethod $m
+            if (-not $installed) {
+                Write-Log "Skipping $($VPNNames[$m])." "warn"
+                continue
+            }
+            # For non-WARP VPNs, check credentials
+            if ($m -ne "warp") {
+                $creds = Load-Credentials
+                $hasCred = Get-VPNCredential -VPNMethod $m -StoredCreds $creds
+                if (-not $hasCred) {
+                    Write-Log "$($VPNNames[$m]) installed but needs credentials." "warn"
+                    Write-Log "Run: .\device-ip-manager.ps1 -Action setup -Method $m" "info"
+                    Write-Host ""
+                    Write-Host "  $($VPNNames[$m]) needs one-time setup." -ForegroundColor Yellow
+                    $doSetup = Read-Host "  Set up now? (y/n)"
+                    if ($doSetup -eq "y" -or $doSetup -eq "Y") {
+                        Invoke-VPNCredentialSetup -VPNMethod $m
+                    } else {
+                        continue
+                    }
+                }
+            }
+        }
+
+        # Try connecting
         $maxRetries = if ($m -eq "warp") { $MaxVPNRetries } else { 3 }
 
         for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
-            Write-Log "$m attempt $attempt of $maxRetries..." "info"
-
-            $vpnResult = Invoke-VPNConnect -VPNMethod $m -OldIP $oldIP
+            Write-Log "$($VPNNames[$m]) attempt $attempt of $maxRetries..." "info"
+            $vpnResult = Invoke-VPNConnect -VPNMethod $m
             $vpnIP = $vpnResult.IP
 
             if (-not $vpnIP) {
-                Write-Log "$m failed to connect. Retrying..." "warn"
+                Write-Log "$($VPNNames[$m]) failed. Retrying..." "warn"
                 Start-Sleep -Seconds 3
                 continue
             }
 
-            Write-Log "$m IP: $vpnIP" "info"
+            Write-Log "$($VPNNames[$m]) IP: $vpnIP" "info"
 
             if ($vpnIP -eq $oldIP) {
                 Write-Log "Same as old IP. Trying again..." "warn"
@@ -656,16 +946,14 @@ function Invoke-ChangeIP {
             $usedMethod = $m
             $vpnActiveFlags[$m] = $true
 
-            # If target URL provided, test it
             if ($TargetUrl) {
                 Start-Sleep -Seconds 2
                 $retest = Test-UrlAccessible -TargetUrl $TargetUrl
                 if ($retest.Accessible) {
-                    Write-Log "Target is now accessible! $($retest.Reason)" "success"
+                    Write-Log "Target accessible! $($retest.Reason)" "success"
                     break
                 } else {
-                    Write-Log "Target still blocked from this IP: $($retest.Reason)" "warn"
-                    Write-Log "Getting a different IP..." "info"
+                    Write-Log "Still blocked: $($retest.Reason)" "warn"
                     $newIP = $null
                     continue
                 }
@@ -698,26 +986,21 @@ function Invoke-ChangeIP {
         }
         Write-Host "  ============================================" -ForegroundColor Green
         Write-Host ""
-        Write-Host "  To restore your original IP later:" -ForegroundColor DarkGray
-        Write-Host "    Run this script and choose Restore" -ForegroundColor White
-        Write-Host "    Or: .\device-ip-manager.ps1 -Action restore" -ForegroundColor DarkGray
+        Write-Host "  To restore: .\device-ip-manager.ps1 -Action restore" -ForegroundColor DarkGray
         Write-Host ""
-
         return $true
     } else {
         Write-Host ""
         Write-Host "  ============================================" -ForegroundColor Red
         Write-Host "    IP CHANGE FAILED" -ForegroundColor Red
         Write-Host "  ============================================" -ForegroundColor Red
-        Write-Host "    All methods exhausted." -ForegroundColor White
         Write-Host ""
-        Write-Host "    Last resort options:" -ForegroundColor Yellow
+        Write-Host "    Last resort:" -ForegroundColor Yellow
         Write-Host "      1. Use mobile hotspot from phone" -ForegroundColor White
-        Write-Host "      2. Restart your router (power off 30s, on)" -ForegroundColor White
+        Write-Host "      2. Restart your router (power off 30s)" -ForegroundColor White
         Write-Host "      3. Wait 30-60 min for rate limit to clear" -ForegroundColor White
         Write-Host "  ============================================" -ForegroundColor Red
         Write-Host ""
-
         return $false
     }
 }
@@ -730,59 +1013,34 @@ function Invoke-RestoreIP {
     Write-Host ""
 
     $state = Load-State
-
     if (-not $state) {
         Write-Log "No saved state found. Nothing to restore." "warn"
-        Write-Log "If your internet is down, try:" "info"
-        Write-Host "    ipconfig /renew" -ForegroundColor White
-        Write-Host "    or restart your router" -ForegroundColor White
         return $false
     }
 
     $originalIP = $state.original_ip
     $method = $state.method
 
-    Write-Log "Found previous state:" "info"
-    Write-Log "  Original IP: $originalIP" "info"
-    Write-Log "  Method used: $method" "info"
+    Write-Log "Original IP: $originalIP | Method: $method" "info"
     Write-Host ""
 
-    # Step 1: Disconnect the VPN that was used
     switch ($method) {
-        "warp" {
-            if ($state.warp_active) { Disconnect-WARP }
-        }
-        "proton" {
-            if ($state.proton_active) { Disconnect-ProtonVPN }
-        }
-        "windscribe" {
-            if ($state.windscribe_active) { Disconnect-Windscribe }
-        }
-        "privado" {
-            if ($state.privado_active) { Disconnect-PrivadoVPN }
-        }
+        "warp"       { if ($state.warp_active) { Disconnect-WARP } }
+        "proton"     { if ($state.proton_active) { Disconnect-ProtonVPN } }
+        "windscribe" { if ($state.windscribe_active) { Disconnect-Windscribe } }
+        "privado"    { if ($state.privado_active) { Disconnect-PrivadoVPN } }
         "dhcp" {
-            Write-Log "Renewing DHCP to restore connection..." "info"
             Start-Process -FilePath "ipconfig" -ArgumentList "/renew" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\dim_out.txt" -RedirectStandardError "$env:TEMP\dim_err.txt"
             Start-Sleep -Seconds 3
         }
         default {
-            Write-Log "Unknown method: $method. Running general recovery..." "warn"
-            Disconnect-WARP
-            Disconnect-ProtonVPN
-            Disconnect-Windscribe
-            Disconnect-PrivadoVPN
+            Disconnect-WARP; Disconnect-ProtonVPN; Disconnect-Windscribe; Disconnect-PrivadoVPN
             Start-Process -FilePath "ipconfig" -ArgumentList "/renew" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\dim_out.txt" -RedirectStandardError "$env:TEMP\dim_err.txt"
             Start-Sleep -Seconds 3
         }
     }
 
-    # Step 2: Flush DNS
     Flush-DNS
-
-    # Step 3: Verify connection
-    Write-Host ""
-    Write-Log "Verifying connection..." "info"
     Start-Sleep -Seconds 2
     $currentIP = Get-PublicIP
 
@@ -797,11 +1055,9 @@ function Invoke-RestoreIP {
         Write-Host "  ============================================" -ForegroundColor Green
         Write-Host ""
     } else {
-        Write-Log "Internet not working after restore! Running recovery..." "error"
-
+        Write-Log "Internet down after restore! Recovering..." "error"
         Start-Process -FilePath "ipconfig" -ArgumentList "/renew" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\dim_out.txt" -RedirectStandardError "$env:TEMP\dim_err.txt"
         Start-Sleep -Seconds 5
-
         $currentIP = Get-PublicIP -Timeout 15
         if ($currentIP) {
             Clear-State
@@ -809,12 +1065,11 @@ function Invoke-RestoreIP {
             Write-Host "  ============================================" -ForegroundColor Green
             Write-Host "    IP RESTORED (after recovery)" -ForegroundColor Green
             Write-Host "  ============================================" -ForegroundColor Green
-            Write-Host "    Original IP:  $originalIP" -ForegroundColor White
             Write-Host "    Current IP:   $currentIP" -ForegroundColor White
             Write-Host "  ============================================" -ForegroundColor Green
             Write-Host ""
         } else {
-            Write-Log "Still no internet. Resetting network adapter..." "warn"
+            Write-Log "Resetting network adapter..." "warn"
             $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
             if ($adapter) {
                 Disable-NetAdapter -Name $adapter.Name -Confirm:$false
@@ -824,11 +1079,9 @@ function Invoke-RestoreIP {
                 Start-Process -FilePath "ipconfig" -ArgumentList "/renew" -Wait -NoNewWindow -RedirectStandardOutput "$env:TEMP\dim_out.txt" -RedirectStandardError "$env:TEMP\dim_err.txt"
                 Start-Sleep -Seconds 5
             }
-
             $currentIP = Get-PublicIP -Timeout 15
             if ($currentIP) {
                 Clear-State
-                Write-Host ""
                 Write-Host "  ============================================" -ForegroundColor Green
                 Write-Host "    IP RESTORED (after adapter reset)" -ForegroundColor Green
                 Write-Host "  ============================================" -ForegroundColor Green
@@ -838,10 +1091,7 @@ function Invoke-RestoreIP {
             } else {
                 Write-Host ""
                 Write-Host "  ============================================" -ForegroundColor Red
-                Write-Host "    RESTORE INCOMPLETE" -ForegroundColor Red
-                Write-Host "  ============================================" -ForegroundColor Red
-                Write-Host "    Internet is NOT working." -ForegroundColor White
-                Write-Host "    Please restart your router manually." -ForegroundColor Yellow
+                Write-Host "    RESTORE INCOMPLETE - restart your router" -ForegroundColor Red
                 Write-Host "  ============================================" -ForegroundColor Red
                 Write-Host ""
             }
@@ -857,52 +1107,48 @@ function Show-Status {
     Write-Host ""
 
     $ip = Get-PublicIP
-    if ($ip) {
-        Write-Host "    Public IP:    $ip" -ForegroundColor Green
-    } else {
-        Write-Host "    Public IP:    (unreachable)" -ForegroundColor Red
+    if ($ip) { Write-Host "    Public IP:    $ip" -ForegroundColor Green }
+    else { Write-Host "    Public IP:    (unreachable)" -ForegroundColor Red }
+
+    # Check each VPN
+    $vpnChecks = @(
+        @{ Name = "WARP";       Installed = (Test-WARPInstalled) },
+        @{ Name = "ProtonVPN";  Installed = (Test-ProtonVPNInstalled) },
+        @{ Name = "Windscribe"; Installed = (Test-WindscribeInstalled) },
+        @{ Name = "PrivadoVPN"; Installed = (Test-PrivadoInstalled) }
+    )
+
+    foreach ($v in $vpnChecks) {
+        if ($v.Installed) {
+            Write-Host "    $($v.Name):    Installed" -ForegroundColor DarkGray
+        } else {
+            Write-Host "    $($v.Name):    Not installed (will auto-install)" -ForegroundColor DarkGray
+        }
     }
 
-    # Check WARP
-    if (Test-Path $WARP_CLI) {
+    # Check credentials
+    $creds = Load-Credentials
+    if ($creds) {
+        Write-Host ""
+        Write-Host "    Saved credentials:" -ForegroundColor Cyan
+        if ($creds.proton) { Write-Host "      ProtonVPN:  Yes" -ForegroundColor DarkGray }
+        if ($creds.windscribe) { Write-Host "      Windscribe: Yes" -ForegroundColor DarkGray }
+        if ($creds.privado) { Write-Host "      PrivadoVPN: Yes" -ForegroundColor DarkGray }
+    }
+
+    # Check WARP status
+    if (Test-WARPInstalled) {
         $warpStatus = & $WARP_CLI status 2>&1
         if ($warpStatus -match "Connected") {
-            Write-Host "    WARP:         Connected" -ForegroundColor Green
-        } else {
-            Write-Host "    WARP:         Disconnected" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "    WARP Status:  Connected" -ForegroundColor Green
         }
-    } else {
-        Write-Host "    WARP:         Not installed" -ForegroundColor DarkGray
     }
 
-    # Check ProtonVPN
-    if (Test-ProtonVPNInstalled) {
-        Write-Host "    ProtonVPN:    Installed" -ForegroundColor DarkGray
-    } else {
-        Write-Host "    ProtonVPN:    Not installed" -ForegroundColor DarkGray
-    }
-
-    # Check Windscribe
-    if (Test-WindscribeInstalled) {
-        Write-Host "    Windscribe:   Installed" -ForegroundColor DarkGray
-    } else {
-        Write-Host "    Windscribe:   Not installed" -ForegroundColor DarkGray
-    }
-
-    # Check PrivadoVPN
-    if (Test-PrivadoInstalled) {
-        Write-Host "    PrivadoVPN:   Installed" -ForegroundColor DarkGray
-    } else {
-        Write-Host "    PrivadoVPN:   Not installed" -ForegroundColor DarkGray
-    }
-
-    # Check for saved state
     $state = Load-State
     if ($state) {
-        Write-Host "    Saved state:  Yes (original IP: $($state.original_ip))" -ForegroundColor Yellow
-        Write-Host "    Method:       $($state.method)" -ForegroundColor Yellow
-    } else {
-        Write-Host "    Saved state:  None" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "    Saved state:  $($state.original_ip) via $($state.method)" -ForegroundColor Yellow
     }
 
     Write-Host ""
@@ -919,35 +1165,23 @@ function Show-Status {
 
 function Invoke-TestUrl {
     param([string]$TargetUrl)
-
     Write-Host ""
     Write-Host "  ============================================" -ForegroundColor Cyan
     Write-Host "    Device IP Manager - URL Test" -ForegroundColor Cyan
     Write-Host "  ============================================" -ForegroundColor Cyan
     Write-Host ""
-
-    if (-not $TargetUrl) {
-        $TargetUrl = Read-Host "  Enter URL to test"
-    }
-
-    if (-not $TargetUrl) {
-        Write-Host "  No URL provided." -ForegroundColor Red
-        return
-    }
-
+    if (-not $TargetUrl) { $TargetUrl = Read-Host "  Enter URL to test" }
+    if (-not $TargetUrl) { Write-Host "  No URL." -ForegroundColor Red; return }
     $ip = Get-PublicIP
     Write-Host "    Current IP:  $ip" -ForegroundColor White
     Write-Host "    Testing:     $TargetUrl" -ForegroundColor White
     Write-Host ""
-
     $result = Test-UrlAccessible -TargetUrl $TargetUrl
     if ($result.Accessible) {
         Write-Host "    Result:      ACCESSIBLE ($($result.Reason))" -ForegroundColor Green
     } else {
         Write-Host "    Result:      BLOCKED ($($result.Reason))" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "    Run IP change to bypass:" -ForegroundColor Yellow
-        Write-Host "      .\device-ip-manager.ps1 -Action change -Url `"$TargetUrl`"" -ForegroundColor White
+        Write-Host "    Run: .\device-ip-manager.ps1 -Action change -Url `"$TargetUrl`"" -ForegroundColor Yellow
     }
     Write-Host ""
 }
@@ -961,4 +1195,5 @@ switch ($Action) {
     "restore" { Invoke-RestoreIP }
     "status"  { Show-Status }
     "test"    { Invoke-TestUrl -TargetUrl $Url }
+    "setup"   { Invoke-VPNCredentialSetup -VPNMethod $Method }
 }

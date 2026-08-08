@@ -1,7 +1,7 @@
 @echo off
 :: Device IP Manager - Change / Restore device IP to bypass API or website restrictions
-:: Supports: Cloudflare WARP, ProtonVPN, Windscribe, PrivadoVPN, DHCP
-:: Standalone tool - does NOT modify any existing IPSwitch scripts
+:: Supports: WARP (auto), ProtonVPN, Windscribe, PrivadoVPN, DHCP
+:: Auto-installs missing VPNs via winget, one-time credential setup per VPN
 
 :: Check for admin
 net session >nul 2>&1
@@ -11,7 +11,6 @@ if %errorLevel% neq 0 (
     exit /b
 )
 
-:: Navigate to script directory
 cd /d "%~dp0"
 
 :menu
@@ -21,23 +20,30 @@ echo   ==================================================
 echo       Device IP Manager - IP Bypass Tool
 echo   ==================================================
 echo.
-echo   Change your device IP to bypass API/website blocks.
-echo   Restore it back when you're done.
-echo.
-echo   Supported VPNs: WARP, ProtonVPN, Windscribe, PrivadoVPN
+echo   VPNs auto-install when first used.
+echo   WARP = no login needed (auto-registers)
+echo   Others = one-time setup (saves login, auto-connects after)
 echo.
 echo   --------------------------------------------------
-echo   [1]  Change IP via WARP (default)
-echo   [2]  Change IP via ProtonVPN
-echo   [3]  Change IP via Windscribe
-echo   [4]  Change IP via PrivadoVPN
-echo   [5]  Change IP via DHCP
-echo   [6]  Auto mode (WARP ^> Proton ^> Windscribe ^> Privado ^> DHCP)
-echo   [7]  Change IP + test specific URL (auto mode)
-echo   [8]  Restore original IP
-echo   [9]  Show current status
-echo   [10] Test a URL from current IP
-echo   [11] Exit
+echo   CHANGE IP:
+echo   [1]  via WARP (no login needed)
+echo   [2]  via ProtonVPN
+echo   [3]  via Windscribe
+echo   [4]  via PrivadoVPN
+echo   [5]  via DHCP
+echo   [6]  Auto mode (tries all VPNs in order)
+echo   [7]  Auto mode + test URL
+echo.
+echo   SETUP (one-time per VPN):
+echo   [8]  Setup ProtonVPN login
+echo   [9]  Setup Windscribe login
+echo   [10] Setup PrivadoVPN login
+echo.
+echo   OTHER:
+echo   [11] Restore original IP
+echo   [12] Show status
+echo   [13] Test a URL
+echo   [14] Exit
 echo   --------------------------------------------------
 echo.
 set /p choice="Select option: "
@@ -49,10 +55,13 @@ if "%choice%"=="4" goto privado
 if "%choice%"=="5" goto dhcp
 if "%choice%"=="6" goto auto
 if "%choice%"=="7" goto auto_url
-if "%choice%"=="8" goto restore
-if "%choice%"=="9" goto status
-if "%choice%"=="10" goto test
-if "%choice%"=="11" exit
+if "%choice%"=="8" goto setup_proton
+if "%choice%"=="9" goto setup_windscribe
+if "%choice%"=="10" goto setup_privado
+if "%choice%"=="11" goto restore
+if "%choice%"=="12" goto status
+if "%choice%"=="13" goto test
+if "%choice%"=="14" exit
 goto menu
 
 :warp
@@ -100,6 +109,24 @@ if "%targetUrl%"=="" (
     goto menu
 )
 powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action change -Url "%targetUrl%" -Method auto
+echo.
+pause
+goto menu
+
+:setup_proton
+powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action setup -Method proton
+echo.
+pause
+goto menu
+
+:setup_windscribe
+powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action setup -Method windscribe
+echo.
+pause
+goto menu
+
+:setup_privado
+powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action setup -Method privado
 echo.
 pause
 goto menu
