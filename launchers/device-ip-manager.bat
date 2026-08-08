@@ -76,73 +76,73 @@ if "%choice%"=="21" exit
 goto menu
 
 :ac_warp
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action fix-autoclaw -Method warp
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action fix-autoclaw -Method warp
 echo.
 pause
 goto menu
 
 :ac_proton
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action fix-autoclaw -Method proton
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action fix-autoclaw -Method proton
 echo.
 pause
 goto menu
 
 :ac_windscribe
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action fix-autoclaw -Method windscribe
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action fix-autoclaw -Method windscribe
 echo.
 pause
 goto menu
 
 :ac_privado
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action fix-autoclaw -Method privado
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action fix-autoclaw -Method privado
 echo.
 pause
 goto menu
 
 :ac_auto
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action fix-autoclaw -Method auto
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action fix-autoclaw -Method auto
 echo.
 pause
 goto menu
 
 :ac_iponly
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action fix-autoclaw -Method auto -SkipAutoClawClear
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action fix-autoclaw -Method auto -SkipAutoClawClear
 echo.
 pause
 goto menu
 
 :warp
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action change -Method warp
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action change -Method warp
 echo.
 pause
 goto menu
 
 :proton
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action change -Method proton
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action change -Method proton
 echo.
 pause
 goto menu
 
 :windscribe
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action change -Method windscribe
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action change -Method windscribe
 echo.
 pause
 goto menu
 
 :privado
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action change -Method privado
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action change -Method privado
 echo.
 pause
 goto menu
 
 :dhcp
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action change -Method dhcp
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action change -Method dhcp
 echo.
 pause
 goto menu
 
 :auto
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action change -Method auto
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action change -Method auto
 echo.
 pause
 goto menu
@@ -155,37 +155,37 @@ if "%targetUrl%"=="" (
     pause
     goto menu
 )
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action change -Url "%targetUrl%" -Method auto
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action change -Url "%targetUrl%" -Method auto
 echo.
 pause
 goto menu
 
 :setup_proton
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action setup -Method proton
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action setup -Method proton
 echo.
 pause
 goto menu
 
 :setup_windscribe
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action setup -Method windscribe
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action setup -Method windscribe
 echo.
 pause
 goto menu
 
 :setup_privado
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action setup -Method privado
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action setup -Method privado
 echo.
 pause
 goto menu
 
 :restore
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action restore
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action restore
 echo.
 pause
 goto menu
 
 :status
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action status
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action status
 echo.
 pause
 goto menu
@@ -198,7 +198,7 @@ if "%testUrl%"=="" (
     pause
     goto menu
 )
-powershell -ExecutionPolicy Bypass -File "%~dp0device-ip-manager.ps1" -Action test -Url "%testUrl%"
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\device-ip-manager.ps1" -Action test -Url "%testUrl%"
 echo.
 pause
 goto menu

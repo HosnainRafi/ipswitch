@@ -11,5 +11,5 @@ if %errorLevel% neq 0 (
 )
 
 cd /d "%~dp0"
-powershell -ExecutionPolicy Bypass -File "%~dp0Fix-AutoClaw.ps1" -Disconnect
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\fix-autoclaw.ps1" -Disconnect
 pause

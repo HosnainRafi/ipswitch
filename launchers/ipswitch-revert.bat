@@ -31,13 +31,13 @@ if "%choice%"=="4" exit
 goto revert
 
 :revert
-powershell -ExecutionPolicy Bypass -File "%~dp0IPSwitch-Revert.ps1"
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\ipswitch-revert.ps1"
 echo.
 pause
 exit
 
 :forcefix
-powershell -ExecutionPolicy Bypass -File "%~dp0IPSwitch-Revert.ps1" -ForceFix
+powershell -ExecutionPolicy Bypass -File "%~dp0..\scripts\ipswitch-revert.ps1" -ForceFix
 echo.
 pause
 exit
