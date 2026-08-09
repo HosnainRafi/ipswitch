@@ -1,5 +1,6 @@
 ﻿logs/
 *.log
 *.csv
-*.json
-config.json
+*.json.state
+config/config.json
+!.gitkeep

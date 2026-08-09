@@ -1,0 +1,83 @@
+{
+  "target_urls": [
+    "https://httpbin.org/status/200",
+    "https://www.google.com"
+  ],
+  "autoclaw_monitoring": {
+    "enabled": true,
+    "check_api_health": true,
+    "api_endpoints": [
+      "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions"
+    ],
+    "verification_failed_patterns": [
+      "verification failed",
+      "authenticate",
+      "invalid api key",
+      "rate limit",
+      "too many requests",
+      "quota exceeded",
+      "request limit reached",
+      "daily limit",
+      "access forbidden",
+      "blocked"
+    ],
+    "gateway_restart_after_ip_change": true,
+    "gateway_restart_wait_seconds": 5
+  },
+  "rate_limit_signals": {
+    "http_status_codes": [429, 403, 503],
+    "timeout_seconds": 10,
+    "max_consecutive_timeouts": 3,
+    "block_page_patterns": [
+      "rate limit",
+      "too many requests",
+      "access denied",
+      "temporarily blocked",
+      "captcha"
+    ]
+  },
+  "ip_change": {
+    "max_retries": 3,
+    "wait_between_retries_seconds": 5,
+    "ip_check_api": "https://api.ipify.org?format=json",
+    "ip_check_timeout_seconds": 10
+  },
+  "provider_priority": ["warp", "proton", "windscribe", "dhcp"],
+  "providers": {
+    "warp": {
+      "enabled": true,
+      "cli_path": "C:\\Program Files\\Cloudflare\\Cloudflare WARP\\warp-cli.exe",
+      "fresh_registration": true,
+      "description": "Cloudflare WARP - primary IP wrapper. Free, no account needed."
+    },
+    "proton": {
+      "enabled": true,
+      "cli_path": "",
+      "server": "",
+      "description": "ProtonVPN free tier. Requires account and login. Install: winget install Proton.ProtonVPN",
+      "credential_env_username": "PROTONVPN_USERNAME",
+      "credential_env_password": "PROTONVPN_PASSWORD"
+    },
+    "windscribe": {
+      "enabled": true,
+      "cli_path": "",
+      "location": "best",
+      "description": "Windscribe free tier (10GB/month). Requires account and login. Install: winget install Windscribe.Windscribe",
+      "credential_env_username": "WINDSCRIBE_USERNAME",
+      "credential_env_password": "WINDSCRIBE_PASSWORD"
+    },
+    "dhcp": {
+      "enabled": true,
+      "description": "Device IP change via DHCP release/renew. No VPN needed but may not work on CGNAT."
+    }
+  },
+  "logging": {
+    "log_file": "logs/ipswitch.log",
+    "console_output": true,
+    "log_level": "info"
+  },
+  "monitor_mode": {
+    "enabled": false,
+    "check_interval_seconds": 60
+  }
+}
